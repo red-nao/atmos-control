@@ -69,6 +69,8 @@ public enum ReverbRoomType: UInt32, CaseIterable, Codable, Sendable, Identifiabl
 
 public enum SourceRenderMode: String, CaseIterable, Codable, Sendable, Identifiable {
     case dualPointStereo, ambienceBedStereo, pointSourceMono, surround714, surroundBed714
+    /// STFT upmix of a STEREO capture onto 6 / 12 virtual speakers (P4).
+    case upmix51, upmix714
     public var id: String { rawValue }
     public var label: String {
         switch self {
@@ -77,8 +79,16 @@ public enum SourceRenderMode: String, CaseIterable, Codable, Sendable, Identifia
         case .pointSourceMono:   return "Mono Point"
         case .surround714:       return "Surround 7.1.4"
         case .surroundBed714:    return "Surround Bed 7.1.4"
+        case .upmix51:           return "Upmix 5.1"
+        case .upmix714:          return "Upmix 7.1.4"
         }
     }
+    /// True for the two synthesized-surround modes (stereo in, N virtual speakers out).
+    public var isUpmix: Bool { self == .upmix51 || self == .upmix714 }
+    /// Virtual speaker count = mixer input bus count for the upmix modes.
+    public var upmixChannels: Int { self == .upmix714 ? kAtmos714Channels : 6 }
+    /// The user-facing modes: the upmix ones are driven by the Upmix switch, not the picker.
+    public static var selectable: [SourceRenderMode] { allCases.filter { !$0.isUpmix } }
     var isBed: Bool { self == .ambienceBedStereo || self == .surroundBed714 }
     var isSurroundBed: Bool { self == .surroundBed714 }
     var isSurround: Bool { self == .surround714 }        // 12 mono buses (11 point + LFE bypass)
@@ -89,6 +99,8 @@ public enum SourceRenderMode: String, CaseIterable, Codable, Sendable, Identifia
         switch self {
         case .dualPointStereo: return 2
         case .surround714:     return UInt32(kAtmos714Channels)
+        case .upmix51:         return 6
+        case .upmix714:        return UInt32(kAtmos714Channels)
         default:               return 1
         }
     }
@@ -116,6 +128,8 @@ public struct SpatialConfig: Sendable, Equatable {
     /// 10-band EQ applied to the stereo capture BEFORE spatialization (see EqualizerUnit).
     /// Changing it never rebuilds the graph.
     public var eq: EQConfig = EQConfig()
+    /// STFT 2→N upmix, between the EQ and the spatial mixer (see STFTUpmixer).
+    public var upmix: UpmixConfig = UpmixConfig()
     public var spatialize: Bool = true                 // false = direct passthrough (debug)
     public var sourceMode: SourceRenderMode = .dualPointStereo
     public var outputType: OutputType = .headphones
@@ -192,6 +206,7 @@ public final class SpatialEngine: @unchecked Sendable {
 
     private var ctx: Ctx?
     private var equalizer: EqualizerUnit?
+    private var upmixer: STFTUpmixer?
     private var activeSampleRate: Double = 48_000     // capture rate of the running graph
     private var outputDeviceID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
     private var startedCaptureID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)  // capture device resolved at start()
@@ -359,6 +374,7 @@ public final class SpatialEngine: @unchecked Sendable {
             ctx.spatialDualPoint = mode.isDualPoint
             ctx.spatialSurround = mode.isSurround
             ctx.spatialSurroundBed = mode.isSurroundBed
+            ctx.spatialUpmix = mode.isUpmix
             var renderFlags: UInt32 = 0
             if config.interauralDelay { renderFlags |= kRenderFlagInterAuralDelay }
             if config.distanceAttenuation { renderFlags |= kRenderFlagDistanceAtten }
@@ -381,18 +397,34 @@ public final class SpatialEngine: @unchecked Sendable {
             dmL.initialize(repeating: 0, count: Int(spatialMax))
             dmR.initialize(repeating: 0, count: Int(spatialMax))
             ctx.dmL = dmL; ctx.dmR = dmR
-            // Surround staging: one plane per capture channel, filled once per render cycle.
-            if mode.isSurround || mode.isSurroundBed {
-                let stage = UnsafeMutablePointer<UnsafeMutablePointer<Float>>.allocate(capacity: captureChannels)
+            // Staging planes: one per mixer bus (upmix) or per capture channel (surround),
+            // filled once per render cycle and then handed to each bus in turn.
+            let stagePlanes = mode.isUpmix ? mode.upmixChannels
+                            : ((mode.isSurround || mode.isSurroundBed) ? captureChannels : 0)
+            if stagePlanes > 0 {
+                let stage = UnsafeMutablePointer<UnsafeMutablePointer<Float>>.allocate(capacity: stagePlanes)
                 var c = 0
-                while c < captureChannels {
+                while c < stagePlanes {
                     let p = UnsafeMutablePointer<Float>.allocate(capacity: Int(spatialMax))
                     p.initialize(repeating: 0, count: Int(spatialMax))
                     stage[c] = p
                     c += 1
                 }
                 ctx.stage = stage
-                ctx.stageChannels = captureChannels
+                ctx.stageChannels = stagePlanes
+            }
+
+            // --- STFT upmixer (stereo in → 6/12 virtual speakers) ---
+            if mode.isUpmix {
+                guard let up = STFTUpmixer(channels: mode.upmixChannels, fftSize: config.upmix.fftSize,
+                                           sampleRate: captureRate, maxFrames: Int(spatialMax),
+                                           config: config.upmix) else {
+                    teardown(); throw SpatialEngineError.setupFailed("STFT upmixer")
+                }
+                upmixer = up
+                ctx.upmixPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(up).toOpaque())
+                selog("  OK  upmixer ready (\(mode.upmixChannels)ch, N=\(config.upmix.fftSize), "
+                      + "latency \(String(format: "%.1f", config.upmix.latencyMS(sampleRate: captureRate))) ms)")
             }
             ctx.spatialMaxFrames = spatialMax
             ctx.spatialMixer = mixer
@@ -444,13 +476,16 @@ public final class SpatialEngine: @unchecked Sendable {
 
     private func teardown() {
         removeSampleRateListener()
-        guard let ctx else { equalizer?.dispose(); equalizer = nil; return }
+        guard let ctx else { equalizer?.dispose(); equalizer = nil; upmixer = nil; return }
         if let c = ctx.captureUnit { AudioOutputUnitStop(c) }
         if let p = ctx.playbackUnit { AudioOutputUnitStop(p) }
         // Unpublish the EQ before disposing it: the RT path reads ctx.eqUnit.
         ctx.eqUnit = nil
         equalizer?.dispose()
         equalizer = nil
+        ctx.upmixPtr = nil          // unpublish before the object goes away
+        ctx.spatialUpmix = false
+        upmixer = nil
         if let abl = ctx.eqABL {
             free(abl.unsafeMutablePointer)   // the buffers point at memory we don't own
             ctx.eqABL = nil
@@ -595,6 +630,13 @@ public final class SpatialEngine: @unchecked Sendable {
         equalizer?.apply(eq, sampleRate: activeSampleRate)
     }
 
+    /// Live-update the upmixer's continuous parameters (no rebuild). Layout and FFT size
+    /// are structural — route those through `reconfigure`.
+    public func updateUpmix(_ u: UpmixConfig) {
+        config.upmix = u
+        upmixer?.update(u)
+    }
+
     /// The pre-amp value actually in force (auto-computed or manual), for UI readout.
     public func currentPreampDB() -> Float { config.eq.effectivePreamp(sampleRate: activeSampleRate) }
 
@@ -628,6 +670,25 @@ public final class SpatialEngine: @unchecked Sendable {
                 AudioUnitSetParameter(mixer, kParamDistance,  kAudioUnitScope_Input, e, AudioUnitParameterValue(dist), 0)
                 AudioUnitSetParameter(mixer, kParamGain,      kAudioUnitScope_Input, e, AudioUnitParameterValue(config.gain), 0)
             }
+        } else if config.sourceMode.isUpmix {
+            // Virtual speaker rig at the canonical angles; surroundSpread widens or
+            // narrows everything behind the listener. Bus 3 (LFE) stays unspatialized.
+            let n = config.sourceMode.upmixChannels
+            let spread = min(max(config.upmix.surroundSpread, 0.5), 1.3)
+            var b = 0
+            while b < n {
+                let e = AudioUnitElement(b)
+                AudioUnitSetParameter(mixer, kParamGain, kAudioUnitScope_Input, e, AudioUnitParameterValue(config.gain), 0)
+                if b != kAtmos714LFEChannel {
+                    let base = kAtmos714Azimuth[b]
+                    // Front L/R/C keep their angles; the surround/height ring scales.
+                    let az = (b <= 2) ? base : max(-179, min(179, base * spread))
+                    AudioUnitSetParameter(mixer, kParamAzimuth,   kAudioUnitScope_Input, e, AudioUnitParameterValue(az + config.azimuth), 0)
+                    AudioUnitSetParameter(mixer, kParamElevation, kAudioUnitScope_Input, e, AudioUnitParameterValue(kAtmos714Elevation[b] + config.elevation), 0)
+                    AudioUnitSetParameter(mixer, kParamDistance,  kAudioUnitScope_Input, e, AudioUnitParameterValue(dist), 0)
+                }
+                b += 1
+            }
         } else if config.sourceMode.isSurround {
             // 11 virtual speakers at canonical 7.1.4 angles + 1 bypassed LFE (bus 3).
             // config.azimuth/elevation rotate the whole stage; distance/gain shared.
@@ -655,6 +716,8 @@ public final class SpatialEngine: @unchecked Sendable {
         let buses: [AudioUnitElement]
         if config.sourceMode.isDualPoint {
             buses = [0, 1]
+        } else if config.sourceMode.isUpmix {
+            buses = (0..<config.sourceMode.upmixChannels).filter { $0 != kAtmos714LFEChannel }.map { AudioUnitElement($0) }
         } else if config.sourceMode.isSurround {
             buses = (0..<kAtmos714Channels).filter { $0 != kAtmos714LFEChannel }.map { AudioUnitElement($0) }
         } else {
@@ -673,6 +736,8 @@ public final class SpatialEngine: @unchecked Sendable {
         let needsRebuild = isRunning && (
             newConfig.spatialize != config.spatialize ||
             newConfig.sourceMode != config.sourceMode ||
+            newConfig.upmix.fftSize != config.upmix.fftSize ||
+            newConfig.upmix.layout != config.upmix.layout ||
             newConfig.outputType != config.outputType ||
             newConfig.hrtfMode != config.hrtfMode ||
             newConfig.algorithm != config.algorithm ||
@@ -694,6 +759,7 @@ public final class SpatialEngine: @unchecked Sendable {
         } else {
             config = newConfig
             equalizer?.apply(config.eq, sampleRate: activeSampleRate)
+            upmixer?.update(config.upmix)
             if let mixer = ctx?.spatialMixer { applySourceParams(mixer: mixer); applyReverbParams(mixer: mixer) }
         }
     }

@@ -89,8 +89,6 @@ final class EngineController {
     var selectedSpatialPresetID: UUID? = SpatialPreset.defaultID
     var deviceProfiles: [DeviceProfile] = []
     var fallbackProfile: DeviceProfile = DeviceProfile.fallback
-    /// Reserved for P4's upmixer; profiles already carry it.
-    var upmixEnabled = false
 
     /// The current output device's profile says "don't process this device". The engine is
     /// stopped and audio reaches the device untouched.
@@ -162,6 +160,7 @@ final class EngineController {
             captureMode = .loopbackDriver
             config.sourceMode = .surround714
         }
+        syncUpmixMode()
         engine.config = config
         scheduleSave()
         if wasOn { powerOn() }
@@ -219,11 +218,11 @@ final class EngineController {
             } ?? SpatialPreset.defaultID
             deviceProfiles = s.deviceProfiles
             fallbackProfile = s.fallbackProfile
-            upmixEnabled = s.upmixEnabled
             selectedEQPresetID = s.lastSelectedEQPresetID.flatMap { id in
                 eqPresets.contains(where: { $0.id == id }) ? id : nil
             } ?? EQPreset.flatID
             if let m = CaptureMode(rawValue: s.captureMode) { captureMode = m }
+            syncUpmixMode()
             // Surround needs the 12-channel driver; fall back rather than start broken.
             if captureChoice == .surround && !surroundDriverInstalled {
                 captureMode = .processTap
@@ -272,7 +271,7 @@ final class EngineController {
         s.lastSelectedSpatialPresetID = selectedSpatialPresetID
         s.deviceProfiles = deviceProfiles
         s.fallbackProfile = fallbackProfile
-        s.upmixEnabled = upmixEnabled
+        s.upmixEnabled = config.upmix.enabled
         s.spatial = config
         s.captureMode = captureMode.rawValue
         s.selectedOutputUID = selectedOutputID.map { SpatialEngine.uid(of: $0) }
@@ -806,6 +805,79 @@ final class EngineController {
 
     private func pushEQ() { engine.updateEQ(config.eq); scheduleSave() }
 
+    // MARK: Upmix (F4)
+
+    /// The upmixer only exists on the stereo capture paths, and only when we're
+    /// spatializing (its output is a virtual speaker rig for the spatial mixer).
+    var upmixAvailable: Bool { config.spatialize && captureChoice != .surround }
+
+    var upmixEnabled: Bool { config.upmix.enabled }
+
+    /// Theoretical added latency of the STFT (one analysis window) — shown, not measured.
+    var upmixLatencyMS: Double {
+        config.upmix.latencyMS(sampleRate: isOn ? engine.currentSampleRate : 48_000)
+    }
+
+    /// Structural switch: the source render mode changes, so the graph is rebuilt
+    /// (100–300 ms of silence — documented and accepted, §4.7).
+    func setUpmixEnabled(_ on: Bool) {
+        guard config.upmix.enabled != on else { return }
+        config.upmix.enabled = on
+        syncUpmixMode()
+        applyConfig()
+    }
+
+    func setUpmixLayout(_ layout: UpmixLayout) {
+        guard config.upmix.layout != layout else { return }
+        config.upmix.layout = layout
+        syncUpmixMode()
+        applyConfig()
+    }
+
+    func setUpmixFFTSize(_ size: Int) {
+        guard config.upmix.fftSize != size else { return }
+        config.upmix.fftSize = size
+        applyConfig()
+    }
+
+    /// Continuous upmix parameters — applied live, no rebuild.
+    func setUpmix(center: Float? = nil, surroundLevel: Float? = nil, heightLevel: Float? = nil,
+                  decorrelation: Float? = nil, ambientBias: Float? = nil,
+                  surroundSpread: Float? = nil, lfe: LFEMode? = nil) {
+        if let v = center { config.upmix.centerStrength = v }
+        if let v = surroundLevel { config.upmix.surroundLevel = v }
+        if let v = heightLevel { config.upmix.heightLevel = v }
+        if let v = decorrelation { config.upmix.decorrelation = v }
+        if let v = ambientBias { config.upmix.ambientBias = v }
+        if let v = surroundSpread { config.upmix.surroundSpread = v }
+        if let v = lfe { config.upmix.lfeMode = v }
+        engine.updateUpmix(config.upmix)
+        // surroundSpread moves the virtual speakers themselves: that's a mixer parameter,
+        // so push it through reconfigure (no rebuild — it lands in applySourceParams).
+        if surroundSpread != nil { applyConfig() } else { scheduleSave() }
+    }
+
+    func resetUpmix() {
+        var u = UpmixConfig()
+        u.enabled = config.upmix.enabled
+        u.layout = config.upmix.layout
+        u.fftSize = config.upmix.fftSize
+        config.upmix = u
+        engine.updateUpmix(u)
+        applyConfig()
+    }
+
+    /// Keep `sourceMode` consistent with the upmix switch. The upmix modes are not user
+    /// selectable in the Source mode picker — this is the only thing that sets them.
+    private func syncUpmixMode() {
+        if config.upmix.enabled && upmixAvailable {
+            let want: SourceRenderMode = config.upmix.layout == .surround714 ? .upmix714 : .upmix51
+            if config.sourceMode != want { config.sourceMode = want }
+        } else if config.sourceMode.isUpmix {
+            config.sourceMode = .dualPointStereo
+        }
+    }
+
     // MARK: Spatial presets
 
     var selectedSpatialPreset: SpatialPreset? { spatialPresets.first { $0.id == selectedSpatialPresetID } }
@@ -940,7 +1012,7 @@ final class EngineController {
         guard let p = activeProfile else { return false }
         return !p.matches(eqEnabled: config.eq.enabled, eqPreset: selectedEQPresetID,
                           spatialEnabled: config.spatialize, spatialPreset: selectedSpatialPresetID,
-                          upmixEnabled: upmixEnabled, bypassed: bypassed && !bypassOverride)
+                          upmixEnabled: config.upmix.enabled, bypassed: bypassed && !bypassOverride)
     }
 
     /// Apply the profile matching a device. Called on output change and before power-on.
@@ -969,7 +1041,8 @@ final class EngineController {
             config = preset.applied(to: config)
         }
         config.spatialize = p.spatialEnabled
-        upmixEnabled = p.upmixEnabled
+        config.upmix.enabled = p.upmixEnabled
+        syncUpmixMode()
         resolveAlgorithm()
         applyConfig()
 
@@ -999,7 +1072,7 @@ final class EngineController {
         p.eqPresetID = selectedEQPresetID
         p.spatialEnabled = config.spatialize
         p.spatialPresetID = selectedSpatialPresetID
-        p.upmixEnabled = upmixEnabled
+        p.upmixEnabled = config.upmix.enabled
         p.autoSwitch = true
         if let idx = deviceProfiles.firstIndex(where: { $0.id == p.id }) { deviceProfiles[idx] = p }
         else { deviceProfiles.append(p) }

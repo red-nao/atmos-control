@@ -22,6 +22,7 @@ struct SettingsView: View {
         Form {
             output
             EqualizerSection()
+            UpmixSection()
             soundstage
             personalization
             rendering
@@ -119,7 +120,16 @@ struct SettingsView: View {
                 .padding(.vertical, 4)
 
             Picker("Source mode", selection: rebuild(\.sourceMode)) {
-                ForEach(SourceRenderMode.allCases) { Text($0.label).tag($0) }
+                ForEach(SourceRenderMode.selectable) { Text($0.label).tag($0) }
+                if controller.config.sourceMode.isUpmix {
+                    // Not selectable — shown so the picker has a valid selection.
+                    Text(controller.config.sourceMode.label).tag(controller.config.sourceMode)
+                }
+            }
+            .disabled(controller.config.sourceMode.isUpmix)
+            if controller.config.sourceMode.isUpmix {
+                Text("The upmixer is driving the source mode. Turn Upmix off to choose one yourself.")
+                    .font(.footnote).foregroundStyle(.secondary)
             }
             Text(sourceModeExplainer)
                 .font(.footnote).foregroundStyle(.secondary)

@@ -282,6 +282,11 @@ final class Ctx: @unchecked Sendable {
     var dmL:             UnsafeMutablePointer<Float>? = nil
     var dmR:             UnsafeMutablePointer<Float>? = nil
     // Surround staging: `channels` planes filled once per render cycle from the ring.
+    /// The STFT upmixer, published as a raw pointer so the RT thread can reach it
+    /// without touching ARC (same trick as Ctx itself). Owned by SpatialEngine.
+    var upmixPtr: UnsafeMutableRawPointer? = nil
+    var spatialUpmix = false
+
     var stage: UnsafeMutablePointer<UnsafeMutablePointer<Float>>? = nil
     var stageChannels: Int = 0
     var spatialMaxFrames: UInt32 = 0
@@ -469,6 +474,29 @@ nonisolated(unsafe) let spatialInputCallback: AURenderCallback = { (
         }
         return noErr
     }
+    if ctx.spatialUpmix {
+        // upmix51 / upmix714: the mixer pulls 6 (or 12) mono buses per cycle. On the
+        // first bus of the cycle, run EQ → upmixer once and stage every virtual speaker;
+        // each bus then just copies its plane.
+        guard let stage = ctx.stage, let dmL = ctx.dmL, let dmR = ctx.dmR,
+              let upPtr = ctx.upmixPtr else {
+            if let p = abl[0].mData { memset(p, 0, Int(abl[0].mDataByteSize)) }
+            return noErr
+        }
+        let st = inTimeStamp.pointee.mSampleTime
+        if st != ctx.lastStagedSampleTime {
+            renderStereoInput(ctx, inTimeStamp, dmL, dmR, n)
+            let up = Unmanaged<STFTUpmixer>.fromOpaque(upPtr).takeUnretainedValue()
+            up.process(inLeft: dmL, inRight: dmR, out: stage, frames: Int(n))
+            ctx.lastStagedSampleTime = st
+        }
+        let b = Int(inBusNumber)
+        if b < ctx.stageChannels, let p = abl[0].mData {
+            memcpy(p, stage[b], Int(n) * 4)
+            abl[0].mDataByteSize = n * 4
+        }
+        return noErr
+    }
     if ctx.spatialSurround {
         // surround714: 12 mono buses pulled per cycle (same timestamp). Stage all 12
         // ring channels ONCE, then hand bus b its matching channel (bus == chan index).
@@ -650,8 +678,8 @@ func makeSpatialMixer(ctxPtr: UnsafeMutableRawPointer, maxFrames: UInt32, mode: 
                                &maxF, UInt32(MemoryLayout<UInt32>.size)), "spatial MaximumFramesPerSlice=\(maxFrames)")
 
     for bus in 0..<busCount {
-        // surround714: the LFE channel (index 3) is rendered unspatialized (Bypass).
-        let isLFE = surround && Int(bus) == kAtmos714LFEChannel
+        // surround714 / upmix: the LFE channel (index 3) is rendered unspatialized (Bypass).
+        let isLFE = (surround || mode.isUpmix) && Int(bus) == kAtmos714LFEChannel
         let busSrcMode: UInt32 = isLFE ? kSrcModeBypass : srcMode
         let spatializedPoint = !bed && !isLFE
 

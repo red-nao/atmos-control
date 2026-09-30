@@ -98,3 +98,14 @@ enum AlgorithmChoice: String, CaseIterable, Identifiable, Hashable {
         }
     }
 }
+
+// MARK: - Upmix parameter ranges (F4)
+
+extension Param {
+    static let upCenter   = ParamSpec(range: 0...1.5,    def: 1.0,  unit: "",    fmt: "%.2f")
+    static let upSurround = ParamSpec(range: -24...6,    def: 0,    unit: " dB", fmt: "%+.0f")
+    static let upHeight   = ParamSpec(range: -24...6,    def: -6,   unit: " dB", fmt: "%+.0f")
+    static let upDecorr   = ParamSpec(range: 0...1,      def: 0.7,  unit: "",    fmt: "%.2f")
+    static let upAmbient  = ParamSpec(range: -12...12,   def: 0,    unit: " dB", fmt: "%+.0f")
+    static let upSpread   = ParamSpec(range: 0.5...1.3,  def: 1.0,  unit: "×",   fmt: "%.2f")
+}

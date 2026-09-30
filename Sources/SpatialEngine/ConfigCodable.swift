@@ -9,7 +9,7 @@ import Foundation
 
 extension SpatialConfig: Codable {
     enum CodingKeys: String, CodingKey {
-        case eq, spatialize, sourceMode, outputType, hrtfMode, algorithm, algorithmMode, headTracking
+        case eq, upmix, spatialize, sourceMode, outputType, hrtfMode, algorithm, algorithmMode, headTracking
         case azimuth, elevation, distance, gain, stereoWidth
         case interauralDelay, distanceAttenuation, attenuationCurve
         case distanceRef, distanceMax, distanceMaxAtten
@@ -20,6 +20,7 @@ extension SpatialConfig: Codable {
         self.init()
         guard let c = try? decoder.container(keyedBy: CodingKeys.self) else { return }
         eq                  = lenient(c, .eq, eq)
+        upmix               = lenient(c, .upmix, upmix)
         spatialize          = lenient(c, .spatialize, spatialize)
         sourceMode          = lenient(c, .sourceMode, sourceMode)
         outputType          = lenient(c, .outputType, outputType)
@@ -62,6 +63,7 @@ extension SpatialConfig: Codable {
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(eq, forKey: .eq)
+        try c.encode(upmix, forKey: .upmix)
         try c.encode(spatialize, forKey: .spatialize)
         try c.encode(sourceMode, forKey: .sourceMode)
         try c.encode(outputType, forKey: .outputType)
