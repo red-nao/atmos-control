@@ -805,6 +805,15 @@ final class EngineController {
 
     private func pushEQ() { engine.updateEQ(config.eq); scheduleSave() }
 
+    /// Master spatial-audio switch (panel). Turning it off drops the whole mixer — and
+    /// with it the upmixer, whose output has nowhere to go.
+    func setSpatialize(_ on: Bool) {
+        guard config.spatialize != on else { return }
+        config.spatialize = on
+        syncUpmixMode()
+        applyConfig()
+    }
+
     // MARK: Upmix (F4)
 
     /// The upmixer only exists on the stereo capture paths, and only when we're

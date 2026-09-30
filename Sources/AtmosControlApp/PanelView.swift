@@ -1,6 +1,10 @@
-// PanelView — the compact menu-bar panel. Power + truthful status + the spatial
-// visualizer + meters + the two sanctioned quick actions. Apple-native restraint.
-// No raw per-source sliders and no HRTF-mode picker — those live in Settings.
+// PanelView — the compact menu-bar panel: power, truthful status, and the three
+// switches you actually reach for (EQ, spatial audio, upmix) with their presets.
+//
+// Everything that is a *setting* rather than a *choice* lives in Full Control: the
+// radar, the meters, the output-type picker and the head-tracking switch were all
+// removed from here (F8). What's left answers one question — "what is happening to my
+// audio right now, and how do I change it in one click?"
 
 import SwiftUI
 import AppKit
@@ -19,7 +23,9 @@ struct PanelView: View {
     /// ScrollView absorbs any residual overflow. The panel NEVER collapses (F11): a mode that
     /// can't run shows an inline notice, not a stripped-down surface.
     private var panelHeight: CGFloat {
-        var h: CGFloat = 430
+        var h: CGFloat = 384
+        if controller.profileDirty { h += 58 }
+        if controller.bypassed { h += 62 }
         if controller.permissionNeeded { h += 78 }
         if controller.silentCaptureSuspected { h += 78 }
         if controller.tapWarning != nil { h += 44 }
@@ -51,10 +57,10 @@ struct PanelView: View {
             Divider()
 
             statusStrip
-            visualizerRow
             Divider()
-            controls
+            quickControls
 
+            if controller.profileDirty { deviceProfileRow }
             if controller.bypassed { bypassNotice }
             if controller.permissionNeeded { permissionNotice }
             if controller.silentCaptureSuspected { silentCaptureNotice }
@@ -116,43 +122,84 @@ struct PanelView: View {
         }
     }
 
-    private var visualizerRow: some View {
-        HStack(alignment: .top, spacing: 8) {
-            VisualizerView()
-            // MeterView reads the controller directly so meter-rate writes invalidate ONLY
-            // the meter, not PanelView's body (which would re-walk panelHeight/NSScreen).
-            MeterView()
-                .frame(width: 62, height: 150)
-        }
-        .frame(maxWidth: .infinity, alignment: .center)
-    }
+    // MARK: Controls — the three switches, each with its preset
 
-    // MARK: Controls — only the two sanctioned quick actions
-
-    private var controls: some View {
+    private var quickControls: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Picker("Output type", selection: rebuildBinding(\.outputType)) {
-                ForEach(OutputType.allCases) { Text($0.shortLabel).tag($0) }
-            }
-            .pickerStyle(.segmented)
-            .labelsHidden()
+            switchRow("Equalizer", isOn: Binding(get: { controller.config.eq.enabled },
+                                                 set: { controller.setEQEnabled($0) }))
+            presetRow(selection: Binding(get: { controller.selectedEQPresetID ?? EQPreset.flatID },
+                                         set: { controller.applyEQPreset($0) }),
+                      items: controller.eqPresets.map { ($0.id, controller.eqPresetLabel($0)) },
+                      enabled: controller.config.eq.enabled)
+
+            Divider()
+
+            switchRow("Spatial audio", isOn: Binding(get: { controller.config.spatialize },
+                                                     set: { controller.setSpatialize($0) }))
+            presetRow(selection: Binding(get: { controller.selectedSpatialPresetID ?? SpatialPreset.defaultID },
+                                         set: { controller.applySpatialPreset($0) }),
+                      items: controller.spatialPresets.map { ($0.id, controller.spatialPresetLabel($0)) },
+                      enabled: controller.config.spatialize)
 
             HStack(spacing: 8) {
-                Toggle("Head tracking", isOn: rebuildBinding(\.headTracking))
-                    .toggleStyle(.switch)
-                    .fixedSize()
+                Text("Upmix to surround")
+                    .foregroundStyle(controller.upmixAvailable ? .primary : .secondary)
                 Spacer(minLength: 8)
-                // Quiet text action — mirrors Settings' "Reset soundstage" (same call, same
-                // disabled condition). Borderless, caption-scale, secondary: no accent fill.
-                Button("Reset") { controller.resetSoundstage() }
-                    .buttonStyle(.borderless)
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
-                    .disabled(!controller.config.spatialize)
-                    .help("Reset the soundstage to front-and-centre")
+                Toggle("", isOn: Binding(get: { controller.upmixEnabled },
+                                         set: { controller.setUpmixEnabled($0) }))
+                    .toggleStyle(.switch)
+                    .labelsHidden()
+                    .controlSize(.mini)
+                    .disabled(!controller.upmixAvailable)
             }
+            .padding(.leading, 12)
+            .help(controller.upmixAvailable
+                  ? "Spread stereo across \(controller.config.upmix.layout.label) virtual speakers (adds \(Int(controller.upmixLatencyMS)) ms)"
+                  : "Upmix needs spatial audio on and a stereo capture")
         }
         .font(.system(size: 12))
+    }
+
+    /// Bold-ish label + switch: the top line of a block.
+    private func switchRow(_ title: String, isOn: Binding<Bool>) -> some View {
+        HStack(spacing: 8) {
+            Text(title).font(.system(size: 12, weight: .medium))
+            Spacer(minLength: 8)
+            Toggle("", isOn: isOn)
+                .toggleStyle(.switch)
+                .labelsHidden()
+                .controlSize(.mini)
+        }
+    }
+
+    /// Indented "Preset  [ … ▾ ]" line under a switch row.
+    private func presetRow(selection: Binding<UUID>, items: [(UUID, String)], enabled: Bool) -> some View {
+        HStack(spacing: 8) {
+            Text("Preset").foregroundStyle(.secondary)
+            Picker("", selection: selection) {
+                ForEach(items, id: \.0) { Text($0.1).tag($0.0) }
+            }
+            .labelsHidden()
+            .disabled(!enabled)
+        }
+        .padding(.leading, 12)
+        .opacity(enabled ? 1 : 0.5)
+    }
+
+    /// Manual changes are session-scoped (§5.4) — offer to pin them to this device.
+    private var deviceProfileRow: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Text("\(controller.profiledDeviceName) — unsaved changes")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .lineLimit(1).truncationMode(.middle)
+            HStack(spacing: 8) {
+                Button("Save for this device") { controller.saveCurrentToDeviceProfile() }
+                    .controlSize(.small)
+                Button("Revert") { controller.revertToDeviceProfile() }
+                    .controlSize(.small)
+            }
+        }
     }
 
     // MARK: Inline notices
@@ -259,12 +306,6 @@ struct PanelView: View {
     }
 
     // MARK: Bindings
-
-    /// Binding that mutates config and triggers a graph rebuild when running.
-    private func rebuildBinding<T>(_ kp: WritableKeyPath<SpatialConfig, T>) -> Binding<T> {
-        Binding(get: { controller.config[keyPath: kp] },
-                set: { controller.config[keyPath: kp] = $0; controller.applyConfig() })
-    }
 
     /// Strip a leading possessive owner prefix ("Alex's ", "Мария’s ") for any user/device;
     /// the StatusChip truncates whatever remains with a native tail ellipsis.
