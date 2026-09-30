@@ -67,6 +67,23 @@ func findAtmosControlDevice() -> AudioDeviceID? {
     return nil
 }
 
+/// HDMI / DisplayPort sinks are usually an AV receiver or a TV that decodes multichannel
+/// itself — the natural default for those is "leave it alone" (bypass).
+func deviceTransportType(_ id: AudioDeviceID) -> UInt32 {
+    var addr = AudioObjectPropertyAddress(mSelector: kAudioDevicePropertyTransportType,
+                                          mScope: kAudioObjectPropertyScopeGlobal,
+                                          mElement: kAudioObjectPropertyElementMain)
+    var value: UInt32 = 0
+    var size = UInt32(MemoryLayout<UInt32>.size)
+    guard AudioObjectGetPropertyData(id, &addr, 0, nil, &size, &value) == noErr else { return 0 }
+    return value
+}
+
+func deviceIsDisplayTransport(_ id: AudioDeviceID) -> Bool {
+    let t = deviceTransportType(id)
+    return t == kAudioDeviceTransportTypeHDMI || t == kAudioDeviceTransportTypeDisplayPort
+}
+
 func deviceNominalSampleRate(_ id: AudioDeviceID) -> Double? {
     var addr = AudioObjectPropertyAddress(
         mSelector: kAudioDevicePropertyNominalSampleRate,

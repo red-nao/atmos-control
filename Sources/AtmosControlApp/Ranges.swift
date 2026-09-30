@@ -10,15 +10,15 @@ enum Param {
     // Soundstage
     static let azimuth   = ParamSpec(range: -180...180, def:  0,   unit: "°",   fmt: "%+.0f")
     static let elevation = ParamSpec(range:  -90...90,  def:  0,   unit: "°",   fmt: "%+.0f")
-    static let distance  = ParamSpec(range: 0.35...6,   def:  1.0, unit: " m",  fmt: "%.2f")
-    static let gain      = ParamSpec(range:  -40...12,  def:  0,   unit: " dB", fmt: "%+.0f")
-    static let width     = ParamSpec(range:    0...90,  def: 30,   unit: "°",   fmt: "%.0f")
+    static let distance  = ParamSpec(range: 0.35...6,   def:  1.2, unit: " m",  fmt: "%.2f")
+    static let gain      = ParamSpec(range:  -40...12,  def:  4,   unit: " dB", fmt: "%+.0f")
+    static let width     = ParamSpec(range:    0...90,  def: 35,   unit: "°",   fmt: "%.0f")
     // Rendering (distance model)
-    static let distanceRef   = ParamSpec(range: 0.1...4,   def: 0.3, unit: " m",  fmt: "%.2f")
+    static let distanceRef   = ParamSpec(range: 0.1...4,   def: 1.0, unit: " m",  fmt: "%.2f")
     static let distanceMax   = ParamSpec(range: 1...20,    def: 6.0, unit: " m",  fmt: "%.1f")
-    static let distanceAtten = ParamSpec(range: 0...60,    def: 40,  unit: " dB", fmt: "%.0f")
+    static let distanceAtten = ParamSpec(range: 0...60,    def: 30,  unit: " dB", fmt: "%.0f")
     // Reverb (E1)
-    static let reverbBlend   = ParamSpec(range: 0...100,   def: 20,  unit: " %",  fmt: "%.0f")
+    static let reverbBlend   = ParamSpec(range: 0...100,   def: 1,   unit: " %",  fmt: "%.0f")
     static let reverbGain    = ParamSpec(range: -40...12,  def: -3,  unit: " dB", fmt: "%+.0f")
 }
 
@@ -60,6 +60,41 @@ enum CaptureChoice: String, CaseIterable, Identifiable {
             return "True multichannel from Apple Music (set Music ▸ Dolby Atmos to Automatic). Personalized spatial profile unavailable in this mode."
         case .virtualStereo:
             return "Routes all audio through the atmos-control virtual device. Works with any output, but rendering is generic (personalized HRTF can’t engage)."
+        }
+    }
+}
+
+// MARK: - Algorithm choice (UI enum over AlgorithmMode + SpatAlgorithm)
+
+/// One picker, two model fields: "Automatic" means `algorithmMode == .automaticByDevice`
+/// (resolved per output device, §5.6); the rest pin `algorithm` directly.
+enum AlgorithmChoice: String, CaseIterable, Identifiable, Hashable {
+    case automatic, hrtf, hrtfHQ, outputType
+    var id: String { rawValue }
+
+    init(_ a: SpatAlgorithm) {
+        switch a {
+        case .hrtf:          self = .hrtf
+        case .hrtfHQ:        self = .hrtfHQ
+        case .useOutputType: self = .outputType
+        }
+    }
+
+    var algorithm: SpatAlgorithm? {
+        switch self {
+        case .automatic:  return nil
+        case .hrtf:       return .hrtf
+        case .hrtfHQ:     return .hrtfHQ
+        case .outputType: return .useOutputType
+        }
+    }
+
+    var label: String {
+        switch self {
+        case .automatic:  return "Automatic (by device)"
+        case .hrtf:       return "HRTF"
+        case .hrtfHQ:     return "HRTF HQ"
+        case .outputType: return "Output type (Apple automatic)"
         }
     }
 }

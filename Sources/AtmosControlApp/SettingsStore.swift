@@ -52,7 +52,14 @@ struct AppSettings: Codable {
     var schemaVersion: Int = AppSettings.currentSchemaVersion
     var eqPresets: [EQPreset] = []
     var lastSelectedEQPresetID: UUID?
-    /// The live spatial + EQ state (spatial *presets* and device profiles arrive in P3).
+    var spatialPresets: [SpatialPreset] = []
+    var lastSelectedSpatialPresetID: UUID?
+    /// Per-output-device behaviour, plus the profile used for unknown devices.
+    var deviceProfiles: [DeviceProfile] = []
+    var fallbackProfile: DeviceProfile = DeviceProfile.fallback
+    /// Reserved for P4's STFT upmixer.
+    var upmixEnabled: Bool = false
+    /// The live spatial + EQ state.
     var spatial: SpatialConfig = SpatialConfig()
     var captureMode: String = CaptureMode.processTap.rawValue
     /// Persisted by UID, not AudioDeviceID: IDs are reassigned on every boot.
@@ -61,7 +68,8 @@ struct AppSettings: Codable {
 
     enum CodingKeys: String, CodingKey {
         case schemaVersion, eqPresets, lastSelectedEQPresetID, spatial
-        case captureMode, selectedOutputUID, launchAtLogin
+        case spatialPresets, lastSelectedSpatialPresetID, deviceProfiles, fallbackProfile
+        case upmixEnabled, captureMode, selectedOutputUID, launchAtLogin
     }
 
     init() {}
@@ -72,11 +80,19 @@ struct AppSettings: Codable {
         eqPresets              = lenient(c, .eqPresets, [])
         lastSelectedEQPresetID = ((try? c.decodeIfPresent(UUID.self, forKey: .lastSelectedEQPresetID)) ?? nil)
         spatial                = lenient(c, .spatial, spatial)
+        spatialPresets         = lenient(c, .spatialPresets, [])
+        lastSelectedSpatialPresetID = ((try? c.decodeIfPresent(UUID.self, forKey: .lastSelectedSpatialPresetID)) ?? nil)
+        deviceProfiles         = lenient(c, .deviceProfiles, [])
+        fallbackProfile        = lenient(c, .fallbackProfile, DeviceProfile.fallback)
+        upmixEnabled           = lenient(c, .upmixEnabled, upmixEnabled)
         captureMode            = lenient(c, .captureMode, captureMode)
         selectedOutputUID      = ((try? c.decodeIfPresent(String.self, forKey: .selectedOutputUID)) ?? nil)
         launchAtLogin          = lenient(c, .launchAtLogin, launchAtLogin)
         // Built-ins and duplicates never come from disk.
         eqPresets = eqPresets.filter { !$0.isBuiltIn }
+        spatialPresets = spatialPresets.filter { !$0.isBuiltIn }
+        deviceProfiles = deviceProfiles.filter { !$0.isFallback }
+        fallbackProfile.id = DeviceProfile.fallbackID
     }
 
     /// Future schema bumps funnel through here (v1 only for now).

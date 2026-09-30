@@ -25,6 +25,8 @@ struct SettingsView: View {
             soundstage
             personalization
             rendering
+            SpatialPresetSection()
+            DeviceProfilesSection()
             general
             levels
         }
@@ -183,12 +185,13 @@ struct SettingsView: View {
     private var rendering: some View {
         Section("Rendering") {
             DisclosureGroup(isExpanded: $advancedExpanded) {
-                Picker("Algorithm", selection: rebuild(\.algorithm)) {
-                    ForEach(SpatAlgorithm.allCases) {
-                        Text($0 == .useOutputType ? "Automatic (from output type)" : $0.label).tag($0)
-                    }
+                Picker("Algorithm", selection: algorithmChoice) {
+                    ForEach(AlgorithmChoice.allCases) { Text($0.label).tag($0) }
                 }
-                if controller.config.algorithm != .useOutputType {
+                if controller.config.algorithmMode == .automaticByDevice {
+                    Text("Automatic → \(controller.automaticAlgorithm.label) for \(controller.outputName). AirPods get Apple's own output-type path so personalized HRTF can engage; everything else gets HRTF HQ.")
+                        .font(.footnote).foregroundStyle(.secondary)
+                } else if controller.config.algorithm != .useOutputType {
                     Label("Personalized HRTF is unavailable with this algorithm.", systemImage: "exclamationmark.triangle")
                         .font(.footnote).foregroundStyle(.orange)
                 }
@@ -210,15 +213,19 @@ struct SettingsView: View {
 
                 Divider()
 
+                let reverbOff = controller.reverbControlsDisabled
                 Toggle("Room reverb", isOn: rebuild(\.reverbEnabled))
+                    .disabled(reverbOff)
                 Picker("Room size", selection: rebuild(\.reverbRoomType)) {
                     ForEach(ReverbRoomType.allCases) { Text($0.label).tag($0) }
                 }
                 .pickerStyle(.segmented)
-                .disabled(!controller.config.reverbEnabled)
+                .disabled(reverbOff || !controller.config.reverbEnabled)
                 reverbBlendSlider
-                    .disabled(!controller.config.reverbEnabled)
-                Text("Reverb is audible under the HRTF / HRTF-HQ algorithms only; it is inert under Automatic.")
+                    .disabled(reverbOff || !controller.config.reverbEnabled)
+                Text(reverbOff
+                     ? "The internal reverb is inert under Automatic / Output type — pick HRTF or HRTF HQ to use it. Your settings are kept."
+                     : "Reverb is audible under the HRTF / HRTF-HQ algorithms only.")
                     .font(.footnote).foregroundStyle(.secondary)
 
                 Button("Reset rendering") { controller.resetRendering() }
@@ -302,6 +309,17 @@ struct SettingsView: View {
     private var outputBinding: Binding<AudioDeviceID?> {
         Binding(get: { controller.selectedOutputID },
                 set: { id in controller.selectOutput(controller.outputs.first(where: { $0.id == id })) })
+    }
+
+    /// The Algorithm picker is one control over two model fields (mode + fixed value).
+    private var algorithmChoice: Binding<AlgorithmChoice> {
+        Binding(get: {
+            controller.config.algorithmMode == .automaticByDevice
+                ? .automatic : AlgorithmChoice(controller.config.algorithm)
+        }, set: { choice in
+            if choice == .automatic { controller.setAlgorithmMode(.automaticByDevice) }
+            else { controller.setAlgorithmMode(.fixed, fixed: choice.algorithm ?? .hrtfHQ) }
+        })
     }
 
     private var captureChoiceBinding: Binding<CaptureChoice> {

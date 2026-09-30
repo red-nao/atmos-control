@@ -55,6 +55,7 @@ struct PanelView: View {
             Divider()
             controls
 
+            if controller.bypassed { bypassNotice }
             if controller.permissionNeeded { permissionNotice }
             if controller.silentCaptureSuspected { silentCaptureNotice }
             if let w = controller.tapWarning { tapWarningRow(w) }
@@ -208,6 +209,19 @@ struct PanelView: View {
                 Button("Retry") { controller.retryCapture() }
                     .controlSize(.small)
             }
+        }
+    }
+
+    /// This output device's profile says "don't process me" (F7). Not an error — the
+    /// original audio is reaching the device untouched, which is the point.
+    private var bypassNotice: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("Bypassed — \(controller.profiledDeviceName) is set to pass audio through untouched.",
+                  systemImage: "arrow.turn.down.right")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
+            Button("Process anyway") { controller.toggle() }
+                .controlSize(.small)
         }
     }
 

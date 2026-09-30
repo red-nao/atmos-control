@@ -101,6 +101,17 @@ public enum SourceRenderMode: String, CaseIterable, Codable, Sendable, Identifia
     }
 }
 
+/// How `SpatialConfig.algorithm` is chosen.
+public enum AlgorithmMode: String, CaseIterable, Codable, Sendable, Identifiable {
+    /// Pick per output device: AirPods → Use Output Type (so Apple's own personalized
+    /// spatial path engages), everything else → HRTF HQ. The resolved value is written
+    /// into `algorithm` by the controller at start / device change.
+    case automaticByDevice
+    /// Use whatever `algorithm` holds, verbatim.
+    case fixed
+    public var id: String { rawValue }
+}
+
 public struct SpatialConfig: Sendable, Equatable {
     /// 10-band EQ applied to the stereo capture BEFORE spatialization (see EqualizerUnit).
     /// Changing it never rebuilds the graph.
@@ -109,24 +120,26 @@ public struct SpatialConfig: Sendable, Equatable {
     public var sourceMode: SourceRenderMode = .dualPointStereo
     public var outputType: OutputType = .headphones
     public var hrtfMode: HRTFMode = .auto
-    public var algorithm: SpatAlgorithm = .useOutputType
+    public var algorithm: SpatAlgorithm = .hrtfHQ
+    /// Default: resolve `algorithm` from the output device (§5.6).
+    public var algorithmMode: AlgorithmMode = .automaticByDevice
     public var headTracking: Bool = true
     public var azimuth: Float = 0      // ±180°
     public var elevation: Float = 0    // ±90°
-    public var distance: Float = 1.0   // metres
-    public var gain: Float = 0         // dB
-    public var stereoWidth: Float = 30 // ± spread (°) of the two dualPoint virtual speakers
-    // Distance rendering (r2): loudness is distance-invariant by default (ITD only).
+    public var distance: Float = 1.20  // metres
+    public var gain: Float = 4         // dB
+    public var stereoWidth: Float = 35 // ± spread (°) of the two dualPoint virtual speakers
+    // Distance rendering (r2): a small, deliberate amount of distance loudness.
     public var interauralDelay: Bool = true
-    public var distanceAttenuation: Bool = false
+    public var distanceAttenuation: Bool = true
     public var attenuationCurve: AttenuationCurve = .inverse
     public var distanceRef: Float = 1.0
     public var distanceMax: Float = 6.0
-    public var distanceMaxAtten: Float = 40.0   // dB, only when distanceAttenuation is on
+    public var distanceMaxAtten: Float = 30.0   // dB, only when distanceAttenuation is on
     // Internal reverb (r1): only audible under HRTF/HRTF-HQ; inert under Use Output Type.
     public var reverbEnabled: Bool = true
-    public var reverbRoomType: ReverbRoomType = .medium
-    public var reverbBlend: Float = 20          // percent 0…100 (per input bus)
+    public var reverbRoomType: ReverbRoomType = .small
+    public var reverbBlend: Float = 1           // percent 0…100 (per input bus)
     public var globalReverbGain: Float = -3     // dB
     public init() {}
 }
@@ -237,6 +250,9 @@ public final class SpatialEngine: @unchecked Sendable {
     /// Stable identifier for a device, for persistence: AudioDeviceIDs are reassigned on
     /// every boot, UIDs are not.
     public static func uid(of device: AudioDeviceID) -> String { deviceUID(device) }
+
+    /// True for HDMI / DisplayPort sinks (AV receivers, TVs) — see DeviceProfile.suggested.
+    public static func isDisplayTransport(_ device: AudioDeviceID) -> Bool { deviceIsDisplayTransport(device) }
 
     /// Resolve a persisted UID back to a live device (nil if it isn't connected).
     public static func device(withUID uid: String) -> AudioDeviceID? {

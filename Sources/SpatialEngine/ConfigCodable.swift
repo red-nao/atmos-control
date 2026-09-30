@@ -9,7 +9,7 @@ import Foundation
 
 extension SpatialConfig: Codable {
     enum CodingKeys: String, CodingKey {
-        case eq, spatialize, sourceMode, outputType, hrtfMode, algorithm, headTracking
+        case eq, spatialize, sourceMode, outputType, hrtfMode, algorithm, algorithmMode, headTracking
         case azimuth, elevation, distance, gain, stereoWidth
         case interauralDelay, distanceAttenuation, attenuationCurve
         case distanceRef, distanceMax, distanceMaxAtten
@@ -25,6 +25,7 @@ extension SpatialConfig: Codable {
         outputType          = lenient(c, .outputType, outputType)
         hrtfMode            = lenient(c, .hrtfMode, hrtfMode)
         algorithm           = lenient(c, .algorithm, algorithm)
+        algorithmMode       = lenient(c, .algorithmMode, algorithmMode)
         headTracking        = lenient(c, .headTracking, headTracking)
         azimuth             = lenient(c, .azimuth, azimuth)
         elevation           = lenient(c, .elevation, elevation)
@@ -46,13 +47,13 @@ extension SpatialConfig: Codable {
         // out-of-range distance that the AU would reject at render time.
         azimuth          = clampFinite(azimuth, -180, 180, 0)
         elevation        = clampFinite(elevation, -90, 90, 0)
-        distance         = clampFinite(distance, 0.1, 20, 1)
-        gain             = clampFinite(gain, -40, 20, 0)
-        stereoWidth      = clampFinite(stereoWidth, 0, 90, 30)
+        distance         = clampFinite(distance, 0.1, 20, 1.2)
+        gain             = clampFinite(gain, -40, 20, 4)
+        stereoWidth      = clampFinite(stereoWidth, 0, 90, 35)
         distanceRef      = clampFinite(distanceRef, 0.1, 20, 1)
         distanceMax      = clampFinite(distanceMax, 0.2, 100, 6)
-        distanceMaxAtten = clampFinite(distanceMaxAtten, 0, 60, 40)
-        reverbBlend      = clampFinite(reverbBlend, 0, 100, 20)
+        distanceMaxAtten = clampFinite(distanceMaxAtten, 0, 60, 30)
+        reverbBlend      = clampFinite(reverbBlend, 0, 100, 1)
         globalReverbGain = clampFinite(globalReverbGain, -40, 20, -3)
     }
 
@@ -66,6 +67,7 @@ extension SpatialConfig: Codable {
         try c.encode(outputType, forKey: .outputType)
         try c.encode(hrtfMode, forKey: .hrtfMode)
         try c.encode(algorithm, forKey: .algorithm)
+        try c.encode(algorithmMode, forKey: .algorithmMode)
         try c.encode(headTracking, forKey: .headTracking)
         try c.encode(azimuth, forKey: .azimuth)
         try c.encode(elevation, forKey: .elevation)

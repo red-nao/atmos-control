@@ -85,6 +85,26 @@ final class EngineController {
     var launchAtLogin = false
     var launchAtLoginNote: String?
 
+    var spatialPresets: [SpatialPreset] = [SpatialPreset.builtInDefault]
+    var selectedSpatialPresetID: UUID? = SpatialPreset.defaultID
+    var deviceProfiles: [DeviceProfile] = []
+    var fallbackProfile: DeviceProfile = DeviceProfile.fallback
+    /// Reserved for P4's upmixer; profiles already carry it.
+    var upmixEnabled = false
+
+    /// The current output device's profile says "don't process this device". The engine is
+    /// stopped and audio reaches the device untouched.
+    var bypassed = false
+    /// Name of the device the active profile was resolved for (UI copy).
+    var profiledDeviceName = "—"
+
+    @ObservationIgnored private var lastProfiledDeviceID: AudioDeviceID?
+    /// The user powered on anyway while a bypass profile was active (session-scoped).
+    @ObservationIgnored private var bypassOverride = false
+    /// We stopped the engine because of a bypass profile — so we may start it again by
+    /// ourselves when a processed device comes back.
+    @ObservationIgnored private var poweredOffByBypass = false
+
     @ObservationIgnored private let store = SettingsStore()
     @ObservationIgnored private let engine = SpatialEngine()
     @ObservationIgnored private let deviceMonitor = DeviceMonitor()
@@ -193,6 +213,13 @@ final class EngineController {
         store.whileLoading {
             config = s.spatial
             eqPresets = [EQPreset.flat] + s.eqPresets
+            spatialPresets = [SpatialPreset.builtInDefault] + s.spatialPresets
+            selectedSpatialPresetID = s.lastSelectedSpatialPresetID.flatMap { id in
+                spatialPresets.contains(where: { $0.id == id }) ? id : nil
+            } ?? SpatialPreset.defaultID
+            deviceProfiles = s.deviceProfiles
+            fallbackProfile = s.fallbackProfile
+            upmixEnabled = s.upmixEnabled
             selectedEQPresetID = s.lastSelectedEQPresetID.flatMap { id in
                 eqPresets.contains(where: { $0.id == id }) ? id : nil
             } ?? EQPreset.flatID
@@ -211,6 +238,25 @@ final class EngineController {
         }
         // The real source of truth for the login item is SMAppService, not our file.
         launchAtLogin = LoginItem.isEnabled
+        primeProfileAtLaunch()
+    }
+
+    /// At launch we restore the state the user left behind — we do NOT overwrite it with
+    /// the device profile (that would throw away their last session every time). We only
+    /// note which device we're pointed at, and honour a bypass profile before powering on.
+    private func primeProfileAtLaunch() {
+        guard let id = currentSinkID() else { return }
+        lastProfiledDeviceID = id
+        profiledDeviceName = outputs.first(where: { $0.id == id })?.name ?? SpatialEngine.currentDefaultOutput().name
+        let p = resolveProfile(for: id)
+        bypassed = p.autoSwitch && p.mode == .bypass
+        resolveAlgorithmAtLaunch()
+    }
+
+    private func resolveAlgorithmAtLaunch() {
+        guard config.algorithmMode == .automaticByDevice else { return }
+        let want = automaticAlgorithm
+        if config.algorithm != want { config.algorithm = want; engine.config = config }
     }
 
     private func deviceDisplayName(_ id: AudioDeviceID) -> String? {
@@ -222,6 +268,11 @@ final class EngineController {
         var s = AppSettings()
         s.eqPresets = eqPresets.filter { !$0.isBuiltIn }
         s.lastSelectedEQPresetID = selectedEQPresetID
+        s.spatialPresets = spatialPresets.filter { !$0.isBuiltIn }
+        s.lastSelectedSpatialPresetID = selectedSpatialPresetID
+        s.deviceProfiles = deviceProfiles
+        s.fallbackProfile = fallbackProfile
+        s.upmixEnabled = upmixEnabled
         s.spatial = config
         s.captureMode = captureMode.rawValue
         s.selectedOutputUID = selectedOutputID.map { SpatialEngine.uid(of: $0) }
@@ -345,6 +396,7 @@ final class EngineController {
     func selectOutput(_ dev: AudioOutputDevice?) {
         selectedOutputID = dev?.id
         scheduleSave()
+        if let d = dev { applyProfile(for: d.id) }
         if let d = dev { outputName = d.name; config.outputType = outputType(for: d) }
         guard isOn else { engine.config = config; return }
         engine.stop()
@@ -368,6 +420,8 @@ final class EngineController {
         outputs = devices
         if let sel = selectedOutputID, !devices.contains(where: { $0.id == sel }) { selectedOutputID = nil }
 
+        followDefaultOutputChange()
+
         guard isOn else {
             let cur = SpatialEngine.currentDefaultOutput()
             if cur.id != SpatialEngine.atmosControlDeviceID() { outputName = cur.name }
@@ -375,6 +429,41 @@ final class EngineController {
         }
         if let sink = activeSinkID, !devices.contains(where: { $0.id == sink }) {
             recoverFromLostSink(devices)
+        }
+    }
+
+    /// The system default output changed (Control Centre, headphones plugged in, …).
+    /// Apply that device's profile and, if we're running and not pinned to a sink, move
+    /// the render there. In loopback mode the default IS our virtual device, so skip.
+    private func followDefaultOutputChange() {
+        guard selectedOutputID == nil else { return }
+        let cur = SpatialEngine.currentDefaultOutput()
+        if let loop = SpatialEngine.atmosControlDeviceID(), cur.id == loop { return }
+        guard cur.id != kAudioObjectUnknown, cur.id != lastProfiledDeviceID else { return }
+
+        applyProfile(for: cur.id)
+        outputName = cur.name
+        if isOn && !bypassed && activeSinkID != cur.id { switchSink(to: cur.id) }
+    }
+
+    /// Move the running graph to a different real sink (same capture source).
+    private func switchSink(to id: AudioDeviceID) {
+        guard isOn else { return }
+        engine.stop()
+        if let d = outputs.first(where: { $0.id == id }) {
+            config.outputType = outputType(for: d)
+            outputName = d.name
+        }
+        resolveAlgorithm()
+        engine.config = config
+        do {
+            try engine.start(outputDeviceID: id, captureDeviceID: activeCaptureID)
+            activeSinkID = id
+            lastError = nil
+            updateActivity()
+        } catch {
+            lastError = "Could not follow the output change — \(error)"
+            powerOff()
         }
     }
 
@@ -467,12 +556,25 @@ final class EngineController {
 
     // MARK: Power
 
-    func toggle() { isOn ? powerOff() : powerOn() }
+    func toggle() {
+        if isOn { powerOff(); return }
+        // Powering on while a bypass profile is active is an explicit override for this
+        // session (the stored profile is untouched — §5.4).
+        if bypassed { bypassOverride = true; bypassed = false; poweredOffByBypass = false }
+        powerOn()
+    }
 
     func powerOn() {
         atmosPresent = engine.atmosControlPresent()
         surroundDriverInstalled = engine.surroundDriverInstalled()
         permissionNeeded = false
+        // Honour this device's profile before we touch any audio.
+        if let sink = currentSinkID() { applyProfile(for: sink) }
+        resolveAlgorithm()
+        if bypassed && !bypassOverride {
+            lastError = nil
+            return                      // profile says: leave this device alone
+        }
         if captureMode == .processTap { startTapMode(); return }
         startLoopbackMode()   // explicit virtual-device (loopback) mode — never an auto-fallback
     }
@@ -704,6 +806,244 @@ final class EngineController {
 
     private func pushEQ() { engine.updateEQ(config.eq); scheduleSave() }
 
+    // MARK: Spatial presets
+
+    var selectedSpatialPreset: SpatialPreset? { spatialPresets.first { $0.id == selectedSpatialPresetID } }
+
+    var spatialDirty: Bool {
+        guard let p = selectedSpatialPreset else { return false }
+        return !p.matches(config)
+    }
+
+    func spatialPresetLabel(_ p: SpatialPreset) -> String {
+        (p.id == selectedSpatialPresetID && spatialDirty) ? "\(p.name) •" : p.name
+    }
+
+    func applySpatialPreset(_ id: UUID) {
+        guard let p = spatialPresets.first(where: { $0.id == id }) else { return }
+        selectedSpatialPresetID = id
+        config = p.applied(to: config)
+        resolveAlgorithm()
+        applyConfig()
+    }
+
+    func saveSelectedSpatialPreset() {
+        guard let idx = spatialPresets.firstIndex(where: { $0.id == selectedSpatialPresetID }),
+              !spatialPresets[idx].isBuiltIn else { return }
+        spatialPresets[idx].spatial = SpatialPreset.staging(of: config)
+        spatialPresets[idx].modifiedAt = Date()
+        scheduleSave()
+    }
+
+    @discardableResult
+    func saveSpatialPresetAs(_ rawName: String) -> Bool {
+        let name = uniqueName(rawName, taken: spatialPresets.map(\.name))
+        guard !name.isEmpty else { return false }
+        let p = SpatialPreset.capture(from: config, name: name)
+        spatialPresets.append(p)
+        selectedSpatialPresetID = p.id
+        scheduleSave()
+        return true
+    }
+
+    func renameSpatialPreset(_ id: UUID, to rawName: String) {
+        guard let idx = spatialPresets.firstIndex(where: { $0.id == id }), !spatialPresets[idx].isBuiltIn else { return }
+        let name = uniqueName(rawName, taken: spatialPresets.filter { $0.id != id }.map(\.name))
+        guard !name.isEmpty else { return }
+        spatialPresets[idx].name = name
+        spatialPresets[idx].modifiedAt = Date()
+        scheduleSave()
+    }
+
+    func deleteSpatialPreset(_ id: UUID) {
+        guard let idx = spatialPresets.firstIndex(where: { $0.id == id }), !spatialPresets[idx].isBuiltIn else { return }
+        spatialPresets.remove(at: idx)
+        if selectedSpatialPresetID == id { selectedSpatialPresetID = SpatialPreset.defaultID }
+        // A profile pointing at a deleted preset falls back to Default.
+        for i in deviceProfiles.indices where deviceProfiles[i].spatialPresetID == id {
+            deviceProfiles[i].spatialPresetID = SpatialPreset.defaultID
+        }
+        if fallbackProfile.spatialPresetID == id { fallbackProfile.spatialPresetID = SpatialPreset.defaultID }
+        scheduleSave()
+    }
+
+    private func uniqueName(_ raw: String, taken: [String]) -> String {
+        let base = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !base.isEmpty else { return "" }
+        let set = Set(taken)
+        if !set.contains(base) { return base }
+        var n = 2
+        while set.contains("\(base) \(n)") { n += 1 }
+        return "\(base) \(n)"
+    }
+
+    // MARK: Algorithm auto-selection (§5.6)
+
+    /// Reverb is inert under Use Output Type, and under Automatic we can't promise which
+    /// algorithm a given device will get — so the reverb controls grey out in both cases.
+    var reverbControlsDisabled: Bool {
+        config.algorithmMode == .automaticByDevice || config.algorithm == .useOutputType
+    }
+
+    /// What Automatic resolves to for the current sink (UI copy + the actual decision).
+    var automaticAlgorithm: SpatAlgorithm { currentSinkIsAirPods ? .useOutputType : .hrtfHQ }
+
+    private var currentSinkIsAirPods: Bool {
+        if let id = currentSinkID(), let d = outputs.first(where: { $0.id == id }) { return d.isAirPods }
+        return outputName.localizedCaseInsensitiveContains("airpods")
+    }
+
+    /// Write the resolved algorithm into the config. No-op when the user picked one.
+    private func resolveAlgorithm() {
+        guard config.algorithmMode == .automaticByDevice else { return }
+        let want = automaticAlgorithm
+        if config.algorithm != want { config.algorithm = want }
+    }
+
+    func setAlgorithmMode(_ mode: AlgorithmMode, fixed: SpatAlgorithm? = nil) {
+        config.algorithmMode = mode
+        if let f = fixed { config.algorithm = f }
+        resolveAlgorithm()
+        applyConfig()
+    }
+
+    // MARK: Device profiles (F7)
+
+    /// The sink audio is (or would be) rendered to: the explicit choice, else the system
+    /// default — never the atmos-control loopback itself.
+    private func currentSinkID() -> AudioDeviceID? {
+        if let sel = selectedOutputID { return sel }
+        if let active = activeSinkID { return active }
+        let cur = SpatialEngine.currentDefaultOutput()
+        if let loop = SpatialEngine.atmosControlDeviceID(), cur.id == loop { return nil }
+        return cur.id
+    }
+
+    /// UID → name → fallback (§5.3).
+    func resolveProfile(for device: AudioDeviceID) -> DeviceProfile {
+        let uid = SpatialEngine.uid(of: device)
+        if let p = deviceProfiles.first(where: { !$0.deviceUID.isEmpty && $0.deviceUID == uid }) { return p }
+        let name = outputs.first(where: { $0.id == device })?.name ?? SpatialEngine.currentDefaultOutput().name
+        if let p = deviceProfiles.first(where: { $0.deviceName == name }) { return p }
+        return fallbackProfile
+    }
+
+    /// Profile for the device we're currently pointed at (fallback when nothing matches).
+    var activeProfile: DeviceProfile? {
+        guard let id = currentSinkID() else { return nil }
+        return resolveProfile(for: id)
+    }
+
+    /// True when the live state differs from what the active profile says — the cue for
+    /// the "Save to this device" button (manual changes are session-scoped, §5.4).
+    var profileDirty: Bool {
+        guard let p = activeProfile else { return false }
+        return !p.matches(eqEnabled: config.eq.enabled, eqPreset: selectedEQPresetID,
+                          spatialEnabled: config.spatialize, spatialPreset: selectedSpatialPresetID,
+                          upmixEnabled: upmixEnabled, bypassed: bypassed && !bypassOverride)
+    }
+
+    /// Apply the profile matching a device. Called on output change and before power-on.
+    func applyProfile(for device: AudioDeviceID, force: Bool = false) {
+        guard force || device != lastProfiledDeviceID else { return }
+        lastProfiledDeviceID = device
+        bypassOverride = false
+        profiledDeviceName = outputs.first(where: { $0.id == device })?.name ?? SpatialEngine.currentDefaultOutput().name
+
+        let p = resolveProfile(for: device)
+        guard p.autoSwitch else { bypassed = false; resolveAlgorithm(); return }
+
+        if p.mode == .bypass {
+            bypassed = true
+            if isOn { poweredOffByBypass = true; powerOff() }
+            return
+        }
+
+        let wasBypassed = bypassed
+        bypassed = false
+        if let eqID = p.eqPresetID, eqPresets.contains(where: { $0.id == eqID }) { applyEQPreset(eqID) }
+        setEQEnabled(p.eqEnabled)
+        if let spID = p.spatialPresetID, spatialPresets.contains(where: { $0.id == spID }),
+           let preset = spatialPresets.first(where: { $0.id == spID }) {
+            selectedSpatialPresetID = spID
+            config = preset.applied(to: config)
+        }
+        config.spatialize = p.spatialEnabled
+        upmixEnabled = p.upmixEnabled
+        resolveAlgorithm()
+        applyConfig()
+
+        // We stopped for a bypassed device; this one is processed, so come back up.
+        if wasBypassed && poweredOffByBypass && !isOn {
+            poweredOffByBypass = false
+            powerOn()
+        }
+    }
+
+    /// Write the current live state into (or create) the profile for the current device.
+    func saveCurrentToDeviceProfile() {
+        guard let id = currentSinkID() else { return }
+        let uid = SpatialEngine.uid(of: id)
+        let name = outputs.first(where: { $0.id == id })?.name ?? profiledDeviceName
+        var p: DeviceProfile
+        if let idx = deviceProfiles.firstIndex(where: { !$0.deviceUID.isEmpty && $0.deviceUID == uid }) {
+            p = deviceProfiles[idx]
+        } else {
+            p = DeviceProfile.suggested(forName: name, uid: uid,
+                                        transportIsDisplay: SpatialEngine.isDisplayTransport(id))
+        }
+        p.deviceUID = uid
+        p.deviceName = name
+        p.mode = (bypassed && !bypassOverride) ? .bypass : .process
+        p.eqEnabled = config.eq.enabled
+        p.eqPresetID = selectedEQPresetID
+        p.spatialEnabled = config.spatialize
+        p.spatialPresetID = selectedSpatialPresetID
+        p.upmixEnabled = upmixEnabled
+        p.autoSwitch = true
+        if let idx = deviceProfiles.firstIndex(where: { $0.id == p.id }) { deviceProfiles[idx] = p }
+        else { deviceProfiles.append(p) }
+        lastProfiledDeviceID = id
+        scheduleSave()
+    }
+
+    /// Discard session-scoped changes and re-apply the stored profile.
+    func revertToDeviceProfile() {
+        guard let id = currentSinkID() else { return }
+        applyProfile(for: id, force: true)
+    }
+
+    /// Add a profile for the current device without changing anything about it.
+    func addProfileForCurrentDevice() {
+        guard let id = currentSinkID() else { return }
+        let uid = SpatialEngine.uid(of: id)
+        guard !deviceProfiles.contains(where: { $0.deviceUID == uid }) else { return }
+        let name = outputs.first(where: { $0.id == id })?.name ?? profiledDeviceName
+        deviceProfiles.append(DeviceProfile.suggested(forName: name, uid: uid,
+                                                      transportIsDisplay: SpatialEngine.isDisplayTransport(id)))
+        scheduleSave()
+    }
+
+    func removeProfile(_ id: UUID) {
+        deviceProfiles.removeAll { $0.id == id }
+        lastProfiledDeviceID = nil
+        scheduleSave()
+    }
+
+    func updateProfile(_ p: DeviceProfile) {
+        if p.isFallback { fallbackProfile = p }
+        else if let idx = deviceProfiles.firstIndex(where: { $0.id == p.id }) { deviceProfiles[idx] = p }
+        scheduleSave()
+        // Re-apply if we just edited the profile in force for the current device.
+        if let id = currentSinkID(), resolveProfile(for: id).id == p.id { applyProfile(for: id, force: true) }
+    }
+
+    /// True when this device already has its own profile (vs. riding the fallback).
+    var currentDeviceHasProfile: Bool {
+        guard let id = currentSinkID() else { return false }
+        return !resolveProfile(for: id).isFallback
+    }
+
     /// Live reverb wet/dry blend (no rebuild; no-op in the engine unless the reverb path is
     /// active, i.e. HRTF / HRTF-HQ).
     func setReverbBlend(_ v: Float) {
@@ -721,16 +1061,17 @@ final class EngineController {
     /// Reset the advanced rendering block to its defaults (amendment B).
     func resetRendering() {
         config.interauralDelay = true
-        config.distanceAttenuation = false
+        config.distanceAttenuation = true
         config.attenuationCurve = .inverse
         config.distanceRef = Float(Param.distanceRef.def)
         config.distanceMax = Float(Param.distanceMax.def)
         config.distanceMaxAtten = Float(Param.distanceAtten.def)
         config.reverbEnabled = true
-        config.reverbRoomType = .medium
+        config.reverbRoomType = .small
         config.reverbBlend = Float(Param.reverbBlend.def)
         config.globalReverbGain = Float(Param.reverbGain.def)
-        config.algorithm = .useOutputType
+        config.algorithmMode = .automaticByDevice
+        resolveAlgorithm()
         applyConfig()
     }
 
