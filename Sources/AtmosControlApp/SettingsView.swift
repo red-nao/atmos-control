@@ -158,6 +158,8 @@ struct SettingsView: View {
         case .pointSourceMono:   return "Mono Point — summed to a single point source."
         case .surround714:       return "Surround 7.1.4 — twelve channels placed at their canonical speaker angles."
         case .surroundBed714:    return "Surround Bed 7.1.4 — the full 7.1.4 field placed as an ambience bed."
+        case .upmix51:           return "Upmix 5.1 — stereo split into direct sound and ambience, then placed on six virtual speakers."
+        case .upmix714:          return "Upmix 7.1.4 — stereo split into direct sound and ambience, then placed on twelve virtual speakers."
         }
     }
 

@@ -424,7 +424,7 @@ public final class SpatialEngine: @unchecked Sendable {
                 upmixer = up
                 ctx.upmixPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(up).toOpaque())
                 selog("  OK  upmixer ready (\(mode.upmixChannels)ch, N=\(config.upmix.fftSize), "
-                      + "latency \(String(format: "%.1f", config.upmix.latencyMS(sampleRate: captureRate))) ms)")
+                      + "latency \(Int(config.upmix.latencyMS(sampleRate: captureRate).rounded())) ms)")
             }
             ctx.spatialMaxFrames = spatialMax
             ctx.spatialMixer = mixer
