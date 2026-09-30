@@ -79,6 +79,17 @@ fi
 
 info "OK: Apple Silicon, macOS $(sw_vers -productVersion), swift present"
 
+# Stable code-signing identity. TCC binds the "System Audio Recording" grant to the app's
+# signature; an ad-hoc cdhash changes on every build, so the grant can silently stop
+# applying (symptom: total silence, or a blip of sound whenever settings change).
+if [ -z "${CODESIGN_ID:-}" ]; then
+    warn "CODESIGN_ID is not set — the app will be ad-hoc signed."
+    warn "  Recommended (once):  bash tools/make-signing-cert.sh"
+    warn "  Then:                CODESIGN_ID=\"atmos-control-dev\" ./install.sh"
+else
+    info "Code-signing identity: $CODESIGN_ID"
+fi
+
 # ── (b) Build the package (release) ─────────────────────────────────────────
 info "Building (swift build -c release)"
 swift build -c release
@@ -141,7 +152,17 @@ EOT
     fi
 fi
 
-# ── (f) Final message ───────────────────────────────────────────────────────
+# ── (f) Post-install verification ───────────────────────────────────────────
+echo
+info "Verifying the installed bundle"
+if /usr/bin/plutil -p "$DEST_APP/Contents/Info.plist" | grep -q 'NSAudioCaptureUsageDescription'; then
+    info "OK: NSAudioCaptureUsageDescription present (System Audio Recording prompt can appear)"
+else
+    fail "NSAudioCaptureUsageDescription missing — system audio capture would be denied silently."
+fi
+codesign -dv "$DEST_APP" 2>&1 | sed 's/^/    /' || warn "codesign verification failed"
+
+# ── (g) Final message ───────────────────────────────────────────────────────
 echo
 info "Done."
 cat <<EOT
@@ -149,6 +170,17 @@ cat <<EOT
     Launch:   open "$DEST_APP"
               (atmos-control is a menu-bar app — look for its glyph at the top-right.)
 
-    On first engine start, macOS will ask for the audio-capture (microphone/TCC)
-    permission. Grant it — atmos-control needs it to read the system audio it spatializes.
+    On first engine start, macOS asks for the "System Audio Recording" permission
+    (System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording ▸
+    System Audio Recording Only). Grant it — without it the tap returns silence while
+    still muting the apps it taps, so you hear nothing at all.
+
+    If you ever change the signing identity, reset the stale grant first:
+        tccutil reset AudioCapture dev.atmoscontrol.app
+        tccutil reset ScreenCapture dev.atmoscontrol.app
+
+    If audio is silent and the panel shows "No system audio detected", try the other
+    tap aggregate topology:
+        defaults write dev.atmoscontrol.app tapAggregate -string anchored   # or tapOnly
+    Recovery if the Mac is stuck silent after a crash:  sudo killall coreaudiod
 EOT

@@ -505,6 +505,12 @@ public final class SpatialEngine: @unchecked Sendable {
         return s
     }
 
+    /// Highest |sample| the capture side has seen since `start()` (never reset).
+    /// 0 after several seconds of playback means the tap is handing us zero-filled
+    /// buffers — the signature of a denied System Audio Recording grant (TCC returns
+    /// noErr everywhere) or of the macOS 26 all-zero tap bug.
+    public func peakSinceStart() -> Float { ctx?.peakEver ?? 0 }
+
     /// Read property 3116 fresh (un-downsampled) — for the process-tap spike's 1 Hz loop.
     public func readPersonalizedHRTFEngaged() -> Bool {
         guard isRunning, let mixer = ctx?.spatialMixer else { return false }

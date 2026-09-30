@@ -34,6 +34,21 @@ final class EngineController {
     /// the system default output). Cleared on a successful start / mode switch / retry.
     var permissionNeeded = false
 
+    /// The tap started and is delivering buffers, but every sample has been 0.0 for over
+    /// ten seconds. That is what a DENIED System Audio Recording grant looks like from the
+    /// inside (every Core Audio call returns noErr), and also what the macOS 26 all-zero
+    /// tap bug looks like. It is ALSO what a genuinely quiet Mac looks like, so the notice
+    /// is worded as a hint, never as an error. Clears the moment real audio arrives.
+    var silentCaptureSuspected = false
+
+    /// Non-fatal warning from the tap layer (e.g. we could not exclude our own process,
+    /// so muting was disabled and you will hear the original audio alongside ours).
+    var tapWarning: String?
+
+    /// Trace of what the tap layer did on the last start (topology used, channel counts,
+    /// self-exclusion). Shown under Levels ▸ Tap diagnostics when debug readouts are on.
+    var tapDiagnostics: [String] = []
+
     /// The installed loopback exposes the full 12-channel 7.1.4 surface (enables Surround).
     var surroundDriverInstalled = false
 
@@ -69,6 +84,8 @@ final class EngineController {
     @ObservationIgnored private let motion = HeadphoneMotion()
     @ObservationIgnored private let tap = ProcessTap()
     @ObservationIgnored private var timer: Timer?
+    @ObservationIgnored private var silenceProbe: Timer?
+    @ObservationIgnored private var silenceTicks = 0
     @ObservationIgnored private var savedDefault: AudioDeviceID?
     @ObservationIgnored private var activeSinkID: AudioDeviceID?   // real device the graph renders to
     @ObservationIgnored private var activeCaptureID: AudioDeviceID?  // tap aggregate (tap mode) or nil
@@ -313,10 +330,16 @@ final class EngineController {
         startLoopbackMode()   // explicit virtual-device (loopback) mode — never an auto-fallback
     }
 
-    /// Deep-link into System Settings ▸ Privacy so the user can grant audio-capture consent.
+    /// Deep-link into System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording.
+    /// The process-tap grant (kTCCServiceAudioCapture, "System Audio Recording Only") lives
+    /// there — NOT under Microphone, which is a different TCC service entirely.
     func openPrivacySettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone") {
-            NSWorkspace.shared.open(url)
+        let candidates = [
+            "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture",
+            "x-apple.systempreferences:com.apple.preference.security?Privacy",
+        ]
+        for s in candidates {
+            if let url = URL(string: s), NSWorkspace.shared.open(url) { return }
         }
     }
 
@@ -343,7 +366,10 @@ final class EngineController {
         else { real = devices.first(where: { $0.id == current.id }) ?? devices.first(where: { $0.isAirPods }) }
 
         do {
-            let aggID = try tap.start(muted: true)
+            // Hand the tap the sink we are about to render to: it is used to prime our HAL
+            // process object (so we can be excluded from the tap) and, in `.anchored`
+            // aggregate mode, as the aggregate's main sub-device.
+            let aggID = try tap.start(muted: true, outputDeviceID: real?.id)
             if let r = real { config.outputType = outputType(for: r); outputName = r.name }
             engine.config = config
             try engine.start(outputDeviceID: real?.id, captureDeviceID: aggID)
@@ -353,8 +379,14 @@ final class EngineController {
             isOn = true
             lastError = nil
             permissionNeeded = false
+            tapDiagnostics = tap.diagnostics
+            tapWarning = tap.selfExcluded ? nil
+                : "Could not exclude this app from the tap, so muting is off — you may hear the "
+                + "original audio alongside the spatialized one. Restart the app."
+            startSilenceProbe()
             updateActivity()
         } catch {
+            tapDiagnostics = tap.diagnostics
             tap.stop()
             // Distinguish a (likely) consent denial from any other tap failure. Tap CREATION
             // failing is overwhelmingly the audio-capture TCC gate; aggregate/UID failures are
@@ -406,6 +438,8 @@ final class EngineController {
     }
 
     func powerOff() {
+        stopSilenceProbe()
+        tapWarning = nil
         engine.stop()
         if tap.isActive { tap.stop() }
         // Restore the system default ONLY if loopback mode actually hijacked it (savedDefault
@@ -507,6 +541,43 @@ final class EngineController {
     }
 
     private func stopPolling() { timer?.invalidate(); timer = nil }
+
+    // MARK: Silent-capture probe
+
+    /// Watch the capture side for "buffers arrive, every sample is 0.0". Runs independently
+    /// of the UI poll timer (which only runs while a window is visible) because the whole
+    /// point is to catch a silently denied grant while the user is staring at a quiet Mac.
+    private func startSilenceProbe() {
+        stopSilenceProbe()
+        silenceTicks = 0
+        silentCaptureSuspected = false
+        let t = Timer(timeInterval: 5.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.silenceTick() }
+        }
+        t.tolerance = 1.0
+        RunLoop.main.add(t, forMode: .common)
+        silenceProbe = t
+    }
+
+    private func stopSilenceProbe() {
+        silenceProbe?.invalidate()
+        silenceProbe = nil
+        silenceTicks = 0
+        if silentCaptureSuspected { silentCaptureSuspected = false }
+    }
+
+    private func silenceTick() {
+        guard isOn else { stopSilenceProbe(); return }
+        if engine.peakSinceStart() > 0 {
+            // Real audio has flowed at least once: the grant is in place. Stop watching.
+            if silentCaptureSuspected { silentCaptureSuspected = false }
+            silenceProbe?.invalidate()
+            silenceProbe = nil
+            return
+        }
+        silenceTicks += 1
+        if silenceTicks >= 2 && !silentCaptureSuspected { silentCaptureSuspected = true }
+    }
 
     private func tick() {
         let s = engine.pollState()

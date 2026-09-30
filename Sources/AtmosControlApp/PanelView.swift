@@ -21,6 +21,8 @@ struct PanelView: View {
     private var panelHeight: CGFloat {
         var h: CGFloat = 430
         if controller.permissionNeeded { h += 78 }
+        if controller.silentCaptureSuspected { h += 78 }
+        if controller.tapWarning != nil { h += 44 }
         if runNotice != nil { h += 46 }
         if controller.musicAtmosAdvisory != nil { h += 30 }
         if controller.lastError != nil { h += 30 }
@@ -54,6 +56,8 @@ struct PanelView: View {
             controls
 
             if controller.permissionNeeded { permissionNotice }
+            if controller.silentCaptureSuspected { silentCaptureNotice }
+            if let w = controller.tapWarning { tapWarningRow(w) }
             if let notice = runNotice { runNoticeRow(notice) }
             if let hint = controller.musicAtmosAdvisory { advisoryRow(hint) }
             if let err = controller.lastError {
@@ -186,6 +190,31 @@ struct PanelView: View {
                     .controlSize(.small)
             }
         }
+    }
+
+    /// Buffers are arriving but every sample is zero. Most often a denied
+    /// "System Audio Recording" grant (every Core Audio call still returns noErr);
+    /// also perfectly normal when nothing is playing, so the wording stays a hint.
+    private var silentCaptureNotice: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label("No system audio detected for 10s. If something is playing, the "
+                + "System Audio Recording permission is probably missing.",
+                  systemImage: "waveform.slash")
+                .font(.system(size: 11)).foregroundStyle(.orange)
+                .fixedSize(horizontal: false, vertical: true)
+            HStack(spacing: 8) {
+                Button("Open Privacy Settings") { controller.openPrivacySettings() }
+                    .controlSize(.small)
+                Button("Retry") { controller.retryCapture() }
+                    .controlSize(.small)
+            }
+        }
+    }
+
+    private func tapWarningRow(_ text: String) -> some View {
+        Label(text, systemImage: "exclamationmark.triangle")
+            .font(.system(size: 10)).foregroundStyle(.orange)
+            .fixedSize(horizontal: false, vertical: true)
     }
 
     private func advisoryRow(_ text: String) -> some View {

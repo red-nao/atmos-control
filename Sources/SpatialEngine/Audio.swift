@@ -261,6 +261,10 @@ final class Ctx: @unchecked Sendable {
     // Written on the capture RT thread, read+reset on the main thread — aligned Float
     // access is atomic on arm64.
     let capturePeaks: UnsafeMutablePointer<Float>
+    // Highest |sample| seen since the graph started, NEVER reset. Used by the silent-capture
+    // probe to tell "the tap is delivering zero-filled buffers" (TCC denied / macOS 26 tap
+    // bug) apart from "the poll meters happen to be idle right now".
+    var peakEver: Float = 0
 
     var spatialMixer:    AudioUnit? = nil
     var spatialize:      Bool = false
@@ -358,6 +362,7 @@ nonisolated(unsafe) let captureInputCallback: AURenderCallback = { (
             var i = 0
             while i < cnt { let a = fabsf(src[i]); if a > pk { pk = a }; i &+= 1 }
             if pk > ctx.capturePeaks[c] { ctx.capturePeaks[c] = pk }
+            if pk > ctx.peakEver { ctx.peakEver = pk }
         }
         c &+= 1
     }

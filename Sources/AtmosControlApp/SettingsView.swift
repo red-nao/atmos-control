@@ -228,6 +228,20 @@ struct SettingsView: View {
                         .font(.system(.callout, design: .monospaced)).monospacedDigit()
                         .foregroundStyle(.secondary)
                 }
+                if !controller.tapDiagnostics.isEmpty {
+                    DisclosureGroup("Tap diagnostics") {
+                        VStack(alignment: .leading, spacing: 3) {
+                            ForEach(Array(controller.tapDiagnostics.enumerated()), id: \.offset) { _, line in
+                                Text(line)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.secondary)
+                                    .textSelection(.enabled)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                }
             }
         }
     }
