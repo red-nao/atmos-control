@@ -266,6 +266,13 @@ final class Ctx: @unchecked Sendable {
     // bug) apart from "the poll meters happen to be idle right now".
     var peakEver: Float = 0
 
+    // 10-band EQ on the stereo capture (nil in the 12-channel loopback modes). Rendered
+    // once per cycle by renderStereoInput(); it pulls the ring itself via eqInputCallback.
+    var eqUnit: AudioUnit? = nil
+    // A 2-buffer ABL shell whose mData pointers are re-aimed at the destination on every
+    // render (no allocation on the RT thread).
+    var eqABL: UnsafeMutableAudioBufferListPointer? = nil
+
     var spatialMixer:    AudioUnit? = nil
     var spatialize:      Bool = false
     var spatialBed:      Bool = false            // stereo AmbienceBed (2ch, reads L/R)
@@ -319,6 +326,16 @@ func makeFloatASBD(channels: UInt32, sampleRate: Double = 48_000) -> AudioStream
     return asbd
 }
 
+/// An ABL with `buffers` mono entries and NO backing memory — the caller re-aims
+/// `mData` at its own buffers before each render. Free with `free(abl.unsafeMutablePointer)`.
+func makeShellABL(buffers: Int) -> UnsafeMutableAudioBufferListPointer {
+    let abl = AudioBufferList.allocate(maximumBuffers: buffers)
+    for i in 0..<buffers {
+        abl[i] = AudioBuffer(mNumberChannels: 1, mDataByteSize: 0, mData: nil)
+    }
+    return abl
+}
+
 func makeCaptureABL(maxFrames: UInt32, channels: Int) -> UnsafeMutableAudioBufferListPointer {
     let abl = AudioBufferList.allocate(maximumBuffers: channels)
     for ch in 0..<channels {
@@ -369,6 +386,54 @@ nonisolated(unsafe) let captureInputCallback: AURenderCallback = { (
     return noErr
 }
 
+// The EQ's input: the raw stereo ring. This is the ONLY place the ring is consumed when
+// an EQ unit exists, so the "read the ring once per render cycle" contract is preserved
+// (renderStereoInput is itself called once per cycle).
+nonisolated(unsafe) let eqInputCallback: AURenderCallback = { (
+    inRefCon, _, _, _, inNumberFrames, ioData
+) -> OSStatus in
+    guard let ioData else { return noErr }
+    let ctx = Unmanaged<Ctx>.fromOpaque(inRefCon).takeUnretainedValue()
+    let abl = UnsafeMutableAudioBufferListPointer(ioData)
+    let n = inNumberFrames
+    guard abl.count >= 2, let p0 = abl[0].mData, let p1 = abl[1].mData else {
+        var b = 0
+        while b < abl.count { if let p = abl[b].mData { memset(p, 0, Int(abl[b].mDataByteSize)) }; b &+= 1 }
+        return noErr
+    }
+    ctx.ring.read(ch0: p0.assumingMemoryBound(to: Float.self),
+                  ch1: p1.assumingMemoryBound(to: Float.self), frameCount: n)
+    abl[0].mDataByteSize = n * 4
+    abl[1].mDataByteSize = n * 4
+    return noErr
+}
+
+/// Produce `n` frames of POST-EQ stereo into `dst0`/`dst1`.
+/// With an EQ unit: render it (which pulls the ring). Without: read the ring directly.
+/// RT-safe — re-aims the pre-allocated ABL shell, no allocation, no Swift runtime calls.
+@inline(__always)
+func renderStereoInput(_ ctx: Ctx, _ ts: UnsafePointer<AudioTimeStamp>,
+                       _ dst0: UnsafeMutablePointer<Float>, _ dst1: UnsafeMutablePointer<Float>,
+                       _ n: UInt32) {
+    if let eq = ctx.eqUnit, let abl = ctx.eqABL {
+        abl[0].mNumberChannels = 1
+        abl[1].mNumberChannels = 1
+        abl[0].mDataByteSize = n * 4
+        abl[1].mDataByteSize = n * 4
+        abl[0].mData = UnsafeMutableRawPointer(dst0)
+        abl[1].mData = UnsafeMutableRawPointer(dst1)
+        var flags = AudioUnitRenderActionFlags()
+        if AudioUnitRender(eq, &flags, ts, 0, n, abl.unsafeMutablePointer) == noErr {
+            // Defensive: an AU is allowed to hand back its own buffers instead of using ours.
+            if let src = abl[0].mData, src != UnsafeMutableRawPointer(dst0) { memcpy(dst0, src, Int(n) * 4) }
+            if let src = abl[1].mData, src != UnsafeMutableRawPointer(dst1) { memcpy(dst1, src, Int(n) * 4) }
+            return
+        }
+        // Render failed: fall through to the dry ring rather than emitting silence.
+    }
+    ctx.ring.read(ch0: dst0, ch1: dst1, frameCount: n)
+}
+
 // Sole ring consumer in spatialize mode (runs inside AudioUnitRender on the
 // playback HAL thread). dualPoint = stereo split across two mono buses;
 // bed = stereo copy; mono point = mono downmix.
@@ -394,7 +459,7 @@ nonisolated(unsafe) let spatialInputCallback: AURenderCallback = { (
         // matching channel to whichever bus is being pulled (bus 0 = L, bus 1 = R).
         let st = inTimeStamp.pointee.mSampleTime
         if st != ctx.lastStagedSampleTime {
-            ctx.ring.read(ch0: dmL, ch1: dmR, frameCount: n)
+            renderStereoInput(ctx, inTimeStamp, dmL, dmR, n)
             ctx.lastStagedSampleTime = st
         }
         let src = (inBusNumber == 0) ? dmL : dmR    // mono bus → 1 buffer
@@ -440,8 +505,9 @@ nonisolated(unsafe) let spatialInputCallback: AURenderCallback = { (
     }
     if ctx.spatialBed {
         if nbuf >= 2, let p0 = abl[0].mData, let p1 = abl[1].mData {
-            ctx.ring.read(ch0: p0.assumingMemoryBound(to: Float.self),
-                          ch1: p1.assumingMemoryBound(to: Float.self), frameCount: n)
+            renderStereoInput(ctx, inTimeStamp,
+                              p0.assumingMemoryBound(to: Float.self),
+                              p1.assumingMemoryBound(to: Float.self), n)
             abl[0].mDataByteSize = n * 4
             abl[1].mDataByteSize = n * 4
         }
@@ -451,7 +517,7 @@ nonisolated(unsafe) let spatialInputCallback: AURenderCallback = { (
         var b = 0; while b < nbuf { if let p = abl[b].mData { memset(p, 0, Int(abl[b].mDataByteSize)) }; b &+= 1 }
         return noErr
     }
-    ctx.ring.read(ch0: dmL, ch1: dmR, frameCount: n)
+    renderStereoInput(ctx, inTimeStamp, dmL, dmR, n)
     let cnt = Int(n)
     var b = 0
     while b < nbuf {
@@ -481,7 +547,7 @@ nonisolated(unsafe) let playbackRenderCallback: AURenderCallback = { (
     if ablp.count >= 2 {
         let dst0 = ablp[0].mData!.assumingMemoryBound(to: Float.self)
         let dst1 = ablp[1].mData!.assumingMemoryBound(to: Float.self)
-        ctx.ring.read(ch0: dst0, ch1: dst1, frameCount: n)
+        renderStereoInput(ctx, inTimeStamp, dst0, dst1, n)
         ablp[0].mDataByteSize = n * 4
         ablp[1].mDataByteSize = n * 4
     } else if ablp.count == 1, let p = ablp[0].mData {

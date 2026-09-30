@@ -499,6 +499,61 @@ final class EngineController {
         engine.updateSource(azimuth: azimuth, elevation: elevation, distance: distance, gain: gain, width: width)
     }
 
+    // MARK: Equalizer (all live — the EQ never rebuilds the graph)
+
+    /// The pre-amp actually in force (auto-computed from the curve, or the manual value).
+    var eqPreampDB: Float { config.eq.effectivePreamp(sampleRate: engine.currentSampleRate) }
+
+    /// Composite response peak of the current curve, before the pre-amp (UI readout).
+    var eqPeakDB: Float { EQConfig.peakResponseDB(gains: config.eq.normalizedGains,
+                                                  sampleRate: engine.currentSampleRate) }
+
+    func setEQEnabled(_ on: Bool) {
+        guard config.eq.enabled != on else { return }
+        config.eq.enabled = on
+        pushEQ()
+    }
+
+    func setEQGain(band: Int, _ value: Float) {
+        var g = config.eq.normalizedGains
+        guard band >= 0, band < g.count else { return }
+        let v = min(max(value, -EQConfig.gainLimit), EQConfig.gainLimit)
+        guard abs(g[band] - v) > 0.001 else { return }
+        g[band] = v
+        config.eq.gains = g
+        pushEQ()
+    }
+
+    func setEQGains(_ gains: [Float]) {
+        config.eq.gains = gains
+        config.eq = EQConfig(enabled: config.eq.enabled, gains: config.eq.normalizedGains,
+                             preampMode: config.eq.preampMode, manualPreamp: config.eq.manualPreamp)
+        pushEQ()
+    }
+
+    func resetEQ() {
+        guard !config.eq.isFlat else { return }
+        config.eq.gains = Array(repeating: 0, count: EQConfig.bandCount)
+        pushEQ()
+    }
+
+    func setPreampMode(_ mode: PreampMode) {
+        guard config.eq.preampMode != mode else { return }
+        // Switching auto -> manual hands over the value that was in force, so nothing jumps.
+        if mode == .manual { config.eq.manualPreamp = config.eq.effectivePreamp(sampleRate: engine.currentSampleRate) }
+        config.eq.preampMode = mode
+        pushEQ()
+    }
+
+    func setManualPreamp(_ value: Float) {
+        let v = min(max(value, -EQConfig.preampLimit), EQConfig.gainLimit)
+        guard abs(config.eq.manualPreamp - v) > 0.001 else { return }
+        config.eq.manualPreamp = v
+        pushEQ()
+    }
+
+    private func pushEQ() { engine.updateEQ(config.eq) }
+
     /// Live reverb wet/dry blend (no rebuild; no-op in the engine unless the reverb path is
     /// active, i.e. HRTF / HRTF-HQ).
     func setReverbBlend(_ v: Float) {

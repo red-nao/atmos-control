@@ -102,6 +102,9 @@ public enum SourceRenderMode: String, CaseIterable, Sendable, Identifiable {
 }
 
 public struct SpatialConfig: Sendable, Equatable {
+    /// 10-band EQ applied to the stereo capture BEFORE spatialization (see EqualizerUnit).
+    /// Changing it never rebuilds the graph.
+    public var eq: EQConfig = EQConfig()
     public var spatialize: Bool = true                 // false = direct passthrough (debug)
     public var sourceMode: SourceRenderMode = .dualPointStereo
     public var outputType: OutputType = .headphones
@@ -175,6 +178,8 @@ public final class SpatialEngine: @unchecked Sendable {
     public var onFormatChange: ((Bool) -> Void)? = nil
 
     private var ctx: Ctx?
+    private var equalizer: EqualizerUnit?
+    private var activeSampleRate: Double = 48_000     // capture rate of the running graph
     private var outputDeviceID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
     private var startedCaptureID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)  // capture device resolved at start()
     private var rateListenerDevice: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
@@ -255,6 +260,7 @@ public final class SpatialEngine: @unchecked Sendable {
         guard let captureRate = deviceNominalSampleRate(captureID) else {
             throw SpatialEngineError.setupFailed("capture nominal sample rate unreadable")
         }
+        activeSampleRate = captureRate
         let isLoopbackCapture = (captureID == findAtmosControlDevice())
         selog("Capture device : [\(captureID)] \(deviceName(captureID)) @ \(Int(captureRate)) Hz")
         selog("Playback device: [\(outID)] \(deviceName(outID))")
@@ -302,11 +308,27 @@ public final class SpatialEngine: @unchecked Sendable {
         }
         var playMax: UInt32 = 4096; var pmSize = UInt32(MemoryLayout<UInt32>.size)
         AudioUnitGetProperty(playbackUnit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &playMax, &pmSize)
+        // One render budget shared by the EQ and the spatial mixer: whatever the biggest
+        // slice either of them can be asked for is.
+        let renderMax = max(playMax, ctx.captureBufSize, 4096)
+
+        // --- Equalizer (stereo capture only; the 12-channel loopback modes skip it) ---
+        if captureChannels == 2 {
+            if let eq = EqualizerUnit(ctxPtr: ctxPtr, sampleRate: captureRate, maxFrames: renderMax) {
+                eq.apply(config.eq, sampleRate: captureRate)
+                equalizer = eq
+                ctx.eqABL = makeShellABL(buffers: 2)
+                ctx.eqUnit = eq.unit        // publish LAST: the RT path keys off this
+                selog("  OK  equalizer ready (10 bands, preamp \(config.eq.effectivePreamp(sampleRate: captureRate)) dB, enabled=\(config.eq.enabled))")
+            } else {
+                selog("  WARN equalizer unavailable — continuing without EQ")
+            }
+        }
 
         // --- Spatial mixer ---
         if config.spatialize {
             let mode = config.sourceMode
-            let spatialMax = max(playMax, ctx.captureBufSize, 4096)
+            let spatialMax = renderMax
             ctx.spatialBed = (mode == .ambienceBedStereo)
             ctx.spatialDualPoint = mode.isDualPoint
             ctx.spatialSurround = mode.isSurround
@@ -396,9 +418,17 @@ public final class SpatialEngine: @unchecked Sendable {
 
     private func teardown() {
         removeSampleRateListener()
-        guard let ctx else { return }
+        guard let ctx else { equalizer?.dispose(); equalizer = nil; return }
         if let c = ctx.captureUnit { AudioOutputUnitStop(c) }
         if let p = ctx.playbackUnit { AudioOutputUnitStop(p) }
+        // Unpublish the EQ before disposing it: the RT path reads ctx.eqUnit.
+        ctx.eqUnit = nil
+        equalizer?.dispose()
+        equalizer = nil
+        if let abl = ctx.eqABL {
+            free(abl.unsafeMutablePointer)   // the buffers point at memory we don't own
+            ctx.eqABL = nil
+        }
         if let m = ctx.spatialMixer { AudioUnitUninitialize(m); AudioComponentInstanceDispose(m); ctx.spatialMixer = nil }
         if let c = ctx.captureUnit { AudioUnitUninitialize(c); AudioComponentInstanceDispose(c); ctx.captureUnit = nil }
         if let p = ctx.playbackUnit { AudioUnitUninitialize(p); AudioComponentInstanceDispose(p); ctx.playbackUnit = nil }
@@ -532,6 +562,19 @@ public final class SpatialEngine: @unchecked Sendable {
         if let mixer = ctx?.spatialMixer { applySourceParams(mixer: mixer) }
     }
 
+    /// Live-update the equalizer (gains, pre-amp, on/off). Never rebuilds the graph:
+    /// the on/off switch is AUNBandEQ's global bypass, so audio keeps flowing.
+    public func updateEQ(_ eq: EQConfig) {
+        config.eq = eq
+        equalizer?.apply(eq, sampleRate: activeSampleRate)
+    }
+
+    /// The pre-amp value actually in force (auto-computed or manual), for UI readout.
+    public func currentPreampDB() -> Float { config.eq.effectivePreamp(sampleRate: activeSampleRate) }
+
+    /// Capture sample rate of the running graph (48 kHz when stopped).
+    public var currentSampleRate: Double { activeSampleRate }
+
     /// Live-update the internal reverb wet/dry blend + gain (no-op unless the reverb
     /// path is active — see reverbActive). Safe while running.
     public func updateReverb(blend: Float? = nil, gain: Float? = nil) {
@@ -624,6 +667,7 @@ public final class SpatialEngine: @unchecked Sendable {
             try start(outputDeviceID: out, captureDeviceID: cap)
         } else {
             config = newConfig
+            equalizer?.apply(config.eq, sampleRate: activeSampleRate)
             if let mixer = ctx?.spatialMixer { applySourceParams(mixer: mixer); applyReverbParams(mixer: mixer) }
         }
     }

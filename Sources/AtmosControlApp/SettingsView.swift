@@ -21,6 +21,7 @@ struct SettingsView: View {
     var body: some View {
         Form {
             output
+            EqualizerSection()
             soundstage
             personalization
             rendering
@@ -28,7 +29,7 @@ struct SettingsView: View {
         }
         .formStyle(.grouped)
         .tint(.instrument)
-        .frame(minWidth: 460, idealWidth: 480, minHeight: 460, idealHeight: 640)
+        .frame(minWidth: 520, idealWidth: 540, minHeight: 460, idealHeight: 680)
         .onAppear { controller.refreshDevices(); controller.settingsAppeared() }
         .onDisappear { controller.settingsDisappeared() }
     }
@@ -76,7 +77,9 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: 2. Soundstage
+    // MARK: 2. Equalizer — see EQView.swift (EqualizerSection)
+
+    // MARK: 3. Soundstage
 
     private var soundstage: some View {
         Section {
