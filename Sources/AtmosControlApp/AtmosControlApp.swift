@@ -67,6 +67,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // atmos-control sink and all system audio black-holes until manually re-selected.
         // (terminate(_:) invokes this before exit, so the menu's Quit button is covered too.)
         EngineController.shared?.powerOff()
+        // Flush the debounced settings write: a change made in the last second before
+        // quitting must not be lost.
+        EngineController.shared?.saveNow()
     }
 
     private func previewWindow<V: View>(_ root: V, title: String, x: CGFloat, fixedSize: NSSize? = nil) {

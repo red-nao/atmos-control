@@ -12,12 +12,19 @@ import SpatialEngine
 struct EqualizerSection: View {
     @Environment(EngineController.self) private var controller
 
+    @State private var showSaveAs = false
+    @State private var showRename = false
+    @State private var showDelete = false
+    @State private var nameField = ""
+
     private var eq: EQConfig { controller.config.eq }
 
     var body: some View {
         Section {
             Toggle("Equalizer", isOn: Binding(get: { eq.enabled },
                                               set: { controller.setEQEnabled($0) }))
+
+            presetBar
 
             EQCurveView(gains: eq.normalizedGains,
                         preamp: controller.eqPreampDB,
@@ -59,33 +66,97 @@ struct EqualizerSection: View {
         }
     }
 
-    // MARK: Pre-amp
+    // MARK: Preset bar
 
     @ViewBuilder
-    private var preampRow: some View {
-        let manual = eq.preampMode == .manual
-        LabeledContent("Pre-amp") {
-            HStack(spacing: 10) {
-                Picker("", selection: Binding(get: { eq.preampMode },
-                                              set: { controller.setPreampMode($0) })) {
-                    ForEach(PreampMode.allCases) { Text($0.label).tag($0) }
+    private var presetBar: some View {
+        let selected = controller.selectedEQPreset
+        let builtIn = selected?.isBuiltIn ?? true
+        LabeledContent("Preset") {
+            HStack(spacing: 8) {
+                Picker("", selection: Binding(get: { controller.selectedEQPresetID ?? EQPreset.flatID },
+                                              set: { controller.applyEQPreset($0) })) {
+                    ForEach(controller.eqPresets) { p in
+                        Text(controller.eqPresetLabel(p)).tag(p.id)
+                    }
                 }
-                .pickerStyle(.segmented).labelsHidden().frame(width: 130)
+                .labelsHidden()
 
-                Slider(value: Binding(get: { Double(manual ? eq.manualPreamp : controller.eqPreampDB) },
-                                      set: { controller.setManualPreamp(Float($0)) }),
-                       in: Double(-EQConfig.preampLimit)...Double(EQConfig.gainLimit))
-                    .disabled(!manual)
-
-                Text(String(format: "%+.1f dB", controller.eqPreampDB))
-                    .font(.system(.callout, design: .monospaced)).monospacedDigit()
-                    .foregroundStyle(.secondary).frame(width: 66, alignment: .trailing)
-                    .contentShape(Rectangle())
-                    .onTapGesture(count: 2) { if manual { controller.setManualPreamp(0) } }
-                    .help(manual ? "Double-click to reset to 0 dB"
-                                 : "Set automatically so the loudest point of the curve stays at 0 dB")
+                Button("Save") { controller.saveSelectedEQPreset() }
+                    .disabled(builtIn || !controller.eqDirty)
+                    .help(builtIn ? "Flat is built in — use Save as… to keep your changes"
+                                  : "Overwrite this preset with the current curve")
+                Button("Save as…") { nameField = suggestedName(); showSaveAs = true }
+                Menu {
+                    Button("Rename…") { nameField = selected?.name ?? ""; showRename = true }
+                        .disabled(builtIn)
+                    Button("Delete…", role: .destructive) { showDelete = true }
+                        .disabled(builtIn)
+                } label: {
+                    Image(systemName: "ellipsis.circle")
+                }
+                .menuStyle(.borderlessButton).frame(width: 24)
             }
         }
+        .disabled(!eq.enabled)
+        .opacity(eq.enabled ? 1 : 0.45)
+        .alert("Save preset as", isPresented: $showSaveAs) {
+            TextField("Name", text: $nameField)
+            Button("Cancel", role: .cancel) {}
+            Button("Save") { controller.saveEQPresetAs(nameField) }
+        } message: {
+            Text("The current curve and pre-amp are stored under this name.")
+        }
+        .alert("Rename preset", isPresented: $showRename) {
+            TextField("Name", text: $nameField)
+            Button("Cancel", role: .cancel) {}
+            Button("Rename") {
+                if let id = controller.selectedEQPresetID { controller.renameEQPreset(id, to: nameField) }
+            }
+        }
+        .alert("Delete preset?", isPresented: $showDelete) {
+            Button("Cancel", role: .cancel) {}
+            Button("Delete", role: .destructive) {
+                if let id = controller.selectedEQPresetID { controller.deleteEQPreset(id) }
+            }
+        } message: {
+            Text("\"\(controller.selectedEQPreset?.name ?? "")\" will be removed. This cannot be undone.")
+        }
+}
+
+/// "Rock" → "Rock copy" when saving a modified built-in/selected preset.
+private func suggestedName() -> String {
+    guard let s = controller.selectedEQPreset, !s.isBuiltIn else { return "My preset" }
+    return "\(s.name) copy"
+}
+
+// MARK: Pre-amp
+
+@ViewBuilder
+private var preampRow: some View {
+    let manual = eq.preampMode == .manual
+    LabeledContent("Pre-amp") {
+        HStack(spacing: 10) {
+            Picker("", selection: Binding(get: { eq.preampMode },
+                                          set: { controller.setPreampMode($0) })) {
+                ForEach(PreampMode.allCases) { Text($0.label).tag($0) }
+            }
+            .pickerStyle(.segmented).labelsHidden().frame(width: 130)
+
+            Slider(value: Binding(get: { Double(manual ? eq.manualPreamp : controller.eqPreampDB) },
+                                  set: { controller.setManualPreamp(Float($0)) }),
+                   in: Double(-EQConfig.preampLimit)...Double(EQConfig.gainLimit))
+                .disabled(!manual)
+
+            Text(String(format: "%+.1f dB", controller.eqPreampDB))
+                .font(.system(.callout, design: .monospaced)).monospacedDigit()
+                .foregroundStyle(.secondary).frame(width: 66, alignment: .trailing)
+                .contentShape(Rectangle())
+                .onTapGesture(count: 2) { if manual { controller.setManualPreamp(0) } }
+                .help(manual ? "Double-click to reset to 0 dB"
+                             : "Set automatically so the loudest point of the curve stays at 0 dB")
+        }
+    }
         .disabled(!eq.enabled)
         .opacity(eq.enabled ? 1 : 0.45)
     }

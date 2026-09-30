@@ -79,6 +79,13 @@ final class EngineController {
     var headYaw: Double = 0
     var headPoseLive = false
 
+    // Persisted state (see SettingsStore). `eqPresets` always begins with the built-in Flat.
+    var eqPresets: [EQPreset] = [EQPreset.flat]
+    var selectedEQPresetID: UUID? = EQPreset.flatID
+    var launchAtLogin = false
+    var launchAtLoginNote: String?
+
+    @ObservationIgnored private let store = SettingsStore()
     @ObservationIgnored private let engine = SpatialEngine()
     @ObservationIgnored private let deviceMonitor = DeviceMonitor()
     @ObservationIgnored private let motion = HeadphoneMotion()
@@ -136,6 +143,7 @@ final class EngineController {
             config.sourceMode = .surround714
         }
         engine.config = config
+        scheduleSave()
         if wasOn { powerOn() }
     }
 
@@ -174,6 +182,144 @@ final class EngineController {
                 self.powerOff()
             }
         }
+
+        loadSettings()
+    }
+
+    // MARK: Persistence
+
+    private func loadSettings() {
+        let s = store.load()
+        store.whileLoading {
+            config = s.spatial
+            eqPresets = [EQPreset.flat] + s.eqPresets
+            selectedEQPresetID = s.lastSelectedEQPresetID.flatMap { id in
+                eqPresets.contains(where: { $0.id == id }) ? id : nil
+            } ?? EQPreset.flatID
+            if let m = CaptureMode(rawValue: s.captureMode) { captureMode = m }
+            // Surround needs the 12-channel driver; fall back rather than start broken.
+            if captureChoice == .surround && !surroundDriverInstalled {
+                captureMode = .processTap
+                config.sourceMode = .dualPointStereo
+            }
+            if let uid = s.selectedOutputUID, let id = SpatialEngine.device(withUID: uid),
+               outputs.contains(where: { $0.id == id }) {
+                selectedOutputID = id
+                outputName = deviceDisplayName(id) ?? outputName
+            }
+            engine.config = config
+        }
+        // The real source of truth for the login item is SMAppService, not our file.
+        launchAtLogin = LoginItem.isEnabled
+    }
+
+    private func deviceDisplayName(_ id: AudioDeviceID) -> String? {
+        outputs.first(where: { $0.id == id })?.name
+    }
+
+    /// Snapshot everything persistable and hand it to the debounced writer.
+    func scheduleSave() {
+        var s = AppSettings()
+        s.eqPresets = eqPresets.filter { !$0.isBuiltIn }
+        s.lastSelectedEQPresetID = selectedEQPresetID
+        s.spatial = config
+        s.captureMode = captureMode.rawValue
+        s.selectedOutputUID = selectedOutputID.map { SpatialEngine.uid(of: $0) }
+        s.launchAtLogin = launchAtLogin
+        store.schedule(s)
+    }
+
+    /// Called on quit: the debounce timer must not eat the last edit.
+    func saveNow() { scheduleSave(); store.flushSynchronously() }
+
+    func revealSettingsFile() { scheduleSave(); store.revealInFinder() }
+
+    // MARK: Launch at login
+
+    func setLaunchAtLogin(_ on: Bool) {
+        launchAtLoginNote = LoginItem.set(on)
+        launchAtLogin = LoginItem.isEnabled
+        scheduleSave()
+    }
+
+    /// Re-read the live SMAppService status (the user can change it in System Settings).
+    func refreshLaunchAtLogin() {
+        let live = LoginItem.isEnabled
+        if live != launchAtLogin { launchAtLogin = live }
+        if live { launchAtLoginNote = nil }
+    }
+
+    // MARK: EQ presets
+
+    var selectedEQPreset: EQPreset? { eqPresets.first { $0.id == selectedEQPresetID } }
+
+    /// The current curve no longer matches the selected preset (shown as a `•`).
+    var eqDirty: Bool {
+        guard let p = selectedEQPreset else { return !config.eq.isFlat }
+        return !p.matches(config.eq)
+    }
+
+    func eqPresetLabel(_ p: EQPreset) -> String {
+        (p.id == selectedEQPresetID && eqDirty) ? "\(p.name) •" : p.name
+    }
+
+    func applyEQPreset(_ id: UUID) {
+        guard let p = eqPresets.first(where: { $0.id == id }) else { return }
+        selectedEQPresetID = id
+        config.eq = p.applied(to: config.eq)
+        pushEQ()
+    }
+
+    /// Overwrite the selected preset with the current curve (disabled for Flat).
+    func saveSelectedEQPreset() {
+        guard let idx = eqPresets.firstIndex(where: { $0.id == selectedEQPresetID }),
+              !eqPresets[idx].isBuiltIn else { return }
+        eqPresets[idx].gains = config.eq.normalizedGains
+        eqPresets[idx].preampMode = config.eq.preampMode
+        eqPresets[idx].manualPreamp = config.eq.manualPreamp
+        eqPresets[idx].modifiedAt = Date()
+        scheduleSave()
+    }
+
+    /// Save the current curve as a new preset and select it.
+    @discardableResult
+    func saveEQPresetAs(_ rawName: String) -> Bool {
+        let name = uniqueEQPresetName(rawName)
+        guard !name.isEmpty else { return false }
+        let p = EQPreset(name: name, gains: config.eq.normalizedGains,
+                         preampMode: config.eq.preampMode, manualPreamp: config.eq.manualPreamp)
+        eqPresets.append(p)
+        selectedEQPresetID = p.id
+        scheduleSave()
+        return true
+    }
+
+    func renameEQPreset(_ id: UUID, to rawName: String) {
+        guard let idx = eqPresets.firstIndex(where: { $0.id == id }), !eqPresets[idx].isBuiltIn else { return }
+        let name = uniqueEQPresetName(rawName, excluding: id)
+        guard !name.isEmpty else { return }
+        eqPresets[idx].name = name
+        eqPresets[idx].modifiedAt = Date()
+        scheduleSave()
+    }
+
+    func deleteEQPreset(_ id: UUID) {
+        guard let idx = eqPresets.firstIndex(where: { $0.id == id }), !eqPresets[idx].isBuiltIn else { return }
+        eqPresets.remove(at: idx)
+        if selectedEQPresetID == id { selectedEQPresetID = EQPreset.flatID }
+        scheduleSave()
+    }
+
+    /// Trim, and disambiguate a clashing name as "Rock 2" — two presets with the same
+    /// name in a Picker are indistinguishable.
+    private func uniqueEQPresetName(_ raw: String, excluding: UUID? = nil) -> String {
+        let base = raw.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !base.isEmpty else { return "" }
+        let taken = Set(eqPresets.filter { $0.id != excluding }.map { $0.name })
+        if !taken.contains(base) { return base }
+        var n = 2
+        while taken.contains("\(base) \(n)") { n += 1 }
+        return "\(base) \(n)"
     }
 
     // MARK: Output devices
@@ -198,6 +344,7 @@ final class EngineController {
     /// Swaps the playback graph live when running (atmos-control stays the default).
     func selectOutput(_ dev: AudioOutputDevice?) {
         selectedOutputID = dev?.id
+        scheduleSave()
         if let d = dev { outputName = d.name; config.outputType = outputType(for: d) }
         guard isOn else { engine.config = config; return }
         engine.stop()
@@ -460,6 +607,7 @@ final class EngineController {
     func setCaptureMode(_ m: CaptureMode) {
         guard captureMode != m else { return }
         captureMode = m
+        scheduleSave()
         if isOn { powerOff(); powerOn() }
     }
 
@@ -483,6 +631,7 @@ final class EngineController {
     /// Apply a rebuild-class config change (output type, HRTF, algorithm, source mode,
     /// head tracking). Brief audio gap while running.
     func applyConfig() {
+        scheduleSave()
         guard isOn else { engine.config = config; return }
         do { try engine.reconfigure(config); updateActivity() }
         catch { lastError = "\(error)"; powerOff() }
@@ -497,6 +646,7 @@ final class EngineController {
         if let g = gain { config.gain = g }
         if let w = width { config.stereoWidth = w }
         engine.updateSource(azimuth: azimuth, elevation: elevation, distance: distance, gain: gain, width: width)
+        scheduleSave()
     }
 
     // MARK: Equalizer (all live — the EQ never rebuilds the graph)
@@ -552,13 +702,14 @@ final class EngineController {
         pushEQ()
     }
 
-    private func pushEQ() { engine.updateEQ(config.eq) }
+    private func pushEQ() { engine.updateEQ(config.eq); scheduleSave() }
 
     /// Live reverb wet/dry blend (no rebuild; no-op in the engine unless the reverb path is
     /// active, i.e. HRTF / HRTF-HQ).
     func setReverbBlend(_ v: Float) {
         config.reverbBlend = v
         engine.updateReverb(blend: v)
+        scheduleSave()
     }
 
     /// Reset the soundstage to the front-and-centre default (F13 / amendment B).

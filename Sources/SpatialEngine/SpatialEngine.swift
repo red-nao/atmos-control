@@ -10,7 +10,7 @@ import Dispatch
 
 // MARK: - Public config types
 
-public enum OutputType: UInt32, CaseIterable, Sendable, Identifiable {
+public enum OutputType: UInt32, CaseIterable, Codable, Sendable, Identifiable {
     case headphones = 1, builtInSpeakers = 2, externalSpeakers = 3
     public var id: UInt32 { rawValue }
     public var label: String {
@@ -31,7 +31,7 @@ public enum OutputType: UInt32, CaseIterable, Sendable, Identifiable {
     }
 }
 
-public enum HRTFMode: UInt32, CaseIterable, Sendable, Identifiable {
+public enum HRTFMode: UInt32, CaseIterable, Codable, Sendable, Identifiable {
     case off = 0, on = 1, auto = 2
     public var id: UInt32 { rawValue }
     public var label: String {
@@ -39,7 +39,7 @@ public enum HRTFMode: UInt32, CaseIterable, Sendable, Identifiable {
     }
 }
 
-public enum SpatAlgorithm: UInt32, CaseIterable, Sendable, Identifiable {
+public enum SpatAlgorithm: UInt32, CaseIterable, Codable, Sendable, Identifiable {
     case hrtf = 2, hrtfHQ = 6, useOutputType = 7
     public var id: UInt32 { rawValue }
     public var label: String {
@@ -47,7 +47,7 @@ public enum SpatAlgorithm: UInt32, CaseIterable, Sendable, Identifiable {
     }
 }
 
-public enum AttenuationCurve: UInt32, CaseIterable, Sendable, Identifiable {
+public enum AttenuationCurve: UInt32, CaseIterable, Codable, Sendable, Identifiable {
     case power = 0, exponential = 1, inverse = 2, linear = 3
     public var id: UInt32 { rawValue }
     public var label: String {
@@ -58,7 +58,7 @@ public enum AttenuationCurve: UInt32, CaseIterable, Sendable, Identifiable {
     }
 }
 
-public enum ReverbRoomType: UInt32, CaseIterable, Sendable, Identifiable {
+public enum ReverbRoomType: UInt32, CaseIterable, Codable, Sendable, Identifiable {
     // rawValue maps directly to kReverbRoomType_SmallRoom / MediumRoom / LargeRoom.
     case small = 0, medium = 1, large = 2
     public var id: UInt32 { rawValue }
@@ -67,7 +67,7 @@ public enum ReverbRoomType: UInt32, CaseIterable, Sendable, Identifiable {
     }
 }
 
-public enum SourceRenderMode: String, CaseIterable, Sendable, Identifiable {
+public enum SourceRenderMode: String, CaseIterable, Codable, Sendable, Identifiable {
     case dualPointStereo, ambienceBedStereo, pointSourceMono, surround714, surroundBed714
     public var id: String { rawValue }
     public var label: String {
@@ -233,6 +233,16 @@ public final class SpatialEngine: @unchecked Sendable {
     }
 
     public static func atmosControlDeviceID() -> AudioDeviceID? { findAtmosControlDevice() }
+
+    /// Stable identifier for a device, for persistence: AudioDeviceIDs are reassigned on
+    /// every boot, UIDs are not.
+    public static func uid(of device: AudioDeviceID) -> String { deviceUID(device) }
+
+    /// Resolve a persisted UID back to a live device (nil if it isn't connected).
+    public static func device(withUID uid: String) -> AudioDeviceID? {
+        guard !uid.isEmpty else { return nil }
+        return allDeviceIDs().first { deviceUID($0) == uid }
+    }
 
     // MARK: Lifecycle
 

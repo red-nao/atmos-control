@@ -25,12 +25,13 @@ struct SettingsView: View {
             soundstage
             personalization
             rendering
+            general
             levels
         }
         .formStyle(.grouped)
         .tint(.instrument)
         .frame(minWidth: 520, idealWidth: 540, minHeight: 460, idealHeight: 680)
-        .onAppear { controller.refreshDevices(); controller.settingsAppeared() }
+        .onAppear { controller.refreshDevices(); controller.refreshLaunchAtLogin(); controller.settingsAppeared() }
         .onDisappear { controller.settingsDisappeared() }
     }
 
@@ -74,6 +75,35 @@ struct SettingsView: View {
             Text("Output")
         } footer: {
             Text(controller.captureChoice.subtitle)
+        }
+    }
+
+    // MARK: General (login item + where the settings live)
+
+    private var general: some View {
+        Section {
+            Toggle("Launch at login", isOn: Binding(get: { controller.launchAtLogin },
+                                                    set: { controller.setLaunchAtLogin($0) }))
+            if let note = controller.launchAtLoginNote {
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Label(note, systemImage: "exclamationmark.triangle")
+                        .font(.footnote).foregroundStyle(.secondary)
+                    Button("Open Login Items") { LoginItem.openLoginItemsSettings() }
+                        .buttonStyle(.link).font(.footnote)
+                }
+            }
+            LabeledContent("Settings file") {
+                HStack(spacing: 8) {
+                    Text("~/Library/Application Support/atmos-control")
+                        .font(.system(.footnote, design: .monospaced))
+                        .foregroundStyle(.secondary).lineLimit(1).truncationMode(.head)
+                    Button("Reveal") { controller.revealSettingsFile() }
+                }
+            }
+        } header: {
+            Text("General")
+        } footer: {
+            Text("Presets and settings are saved automatically, about a second after you stop changing them.")
         }
     }
 

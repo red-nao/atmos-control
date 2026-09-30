@@ -38,7 +38,10 @@ let package = Package(
         .executableTarget(
             name: "AtmosControlApp",
             dependencies: ["SpatialEngine"],
-            path: "Sources/AtmosControlApp"
+            path: "Sources/AtmosControlApp",
+            linkerSettings: [
+                .linkedFramework("ServiceManagement"),   // SMAppService: launch at login
+            ]
         ),
         // Phase 4 spike: prove personalized HRTF (3116) engages while capturing the
         // system mix via a MUTING process tap, WITHOUT hijacking the default output

@@ -58,6 +58,21 @@ public struct EQConfig: Codable, Equatable, Sendable {
         self.manualPreamp = manualPreamp
     }
 
+    // Forgiving decode, for the same reason as SpatialConfig (see ConfigCodable.swift):
+    // a settings.json from another build must never fail to load as a whole.
+    enum CodingKeys: String, CodingKey { case enabled, gains, preampMode, manualPreamp }
+
+    public init(from decoder: Decoder) throws {
+        self.init()
+        guard let c = try? decoder.container(keyedBy: CodingKeys.self) else { return }
+        enabled      = lenient(c, .enabled, enabled)
+        gains        = lenient(c, .gains, gains)
+        preampMode   = lenient(c, .preampMode, preampMode)
+        manualPreamp = clampFinite(lenient(c, .manualPreamp, manualPreamp),
+                                   -EQConfig.preampLimit, EQConfig.gainLimit, 0)
+        gains = normalizedGains
+    }
+
     /// Always exactly `bandCount` values, each clamped to ±`gainLimit`.
     public var normalizedGains: [Float] {
         var g = gains
