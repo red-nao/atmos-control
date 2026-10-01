@@ -2,29 +2,53 @@
   <img src="docs/assets/hero.svg" alt="atmos-control — personalized spatial audio for macOS" width="820">
 </p>
 
-<p align="center">English | <a href="README.ru.md">Русский</a></p>
-
-# atmos-control
+# atmos-control (EQ + upmix fork)
 
 **Personalized spatial audio for macOS** — system-wide, head-tracked binaural sound with a full
 manual control surface over Apple's own spatial renderer (`AUSpatialMixer`). It runs as a menu-bar
 app and spatializes everything your Mac plays to your headphones in real time, with personalized
-HRTF and AirPods head tracking. It is built for listeners who already understand spatial audio and
-want the renderer controls the OS keeps hidden — output type, spatialization algorithm, per-source
-azimuth/elevation/distance/gain, HRTF mode, and head tracking.
+HRTF and AirPods head tracking.
 
-atmos-control is **not** a Dolby Atmos decoder. It is a PCM spatializer and stereo/surround upmixer
-driven by the same Apple DSP engine that powers Spatial Audio — the one-sentence differentiator is
-that it hands you manual control over Apple's spatial renderer, with personalized HRTF and head
-tracking, instead of a single system on/off switch.
+This is a **fork of [yukij3/atmos-control](https://github.com/yukij3/atmos-control)** that turns the
+original spatializer into a complete everyday listening chain: a 10-band equalizer in front of the
+renderer, an STFT stereo→surround upmixer behind it, presets and per-device profiles for both, and a
+menu-bar panel reduced to the three switches you actually reach for. See
+[Acknowledgements](#acknowledgements).
+
+*(The upstream Russian translation, [README.ru.md](README.ru.md), describes the original project and is not updated for this fork.)*
+
+atmos-control is **not** a Dolby Atmos decoder. It is a PCM equalizer, upmixer, and spatializer
+driven by the same Apple DSP engine that powers Spatial Audio — it hands you manual control over
+Apple's spatial renderer instead of a single system on/off switch.
+
+---
+
+## What this fork adds
+
+| | Feature | Where |
+|---|---|---|
+| **F1** | 10-band equalizer (32 Hz … 16 kHz, ±12 dB, 1-octave parametric) hosted on `AUNBandEQ`, applied to the stereo signal **before** spatialization | Full Control ▸ Equalizer |
+| **F2** | Automatic pre-amp — computes the combined response and pulls the output down so the loudest point of the curve sits at 0 dB (manual override available) | Full Control ▸ Equalizer ▸ Pre-amp |
+| **F3** | EQ presets: save / rename / delete, JSON-persisted | Full Control ▸ Equalizer ▸ Preset |
+| **F4** | **STFT stereo→surround upmixer** (direct/ambient separation, 5.1 or 7.1.4) feeding the spatial mixer's virtual speakers | Full Control ▸ Upmix |
+| **F5** | Binaural rendering through `AUSpatialMixer` (inherited from upstream) | Full Control ▸ Soundstage / Rendering |
+| **F6** | Spatial presets — the whole soundstage/rendering/reverb state under a name | Full Control ▸ Spatial presets |
+| **F7** | Per-output-device profiles: EQ on/off + preset, spatial on/off + preset, or full **Bypass** for an AV receiver | Full Control ▸ Device profiles |
+| **F8** | Rebuilt menu-bar panel: EQ switch + preset, Spatial switch + preset, Upmix switch. Everything else moved to Full Control | Menu-bar panel |
+| | Launch at login (`SMAppService`), settings + presets persisted to JSON, IO stall watchdog, sample-rate-change recovery, sleep/wake handling | — |
+
+Also in this fork: click-to-step sliders (click either side of the knob to nudge by exactly one
+unit — see [Controls](#a-note-on-the-sliders)), and a single accent colour across every control.
 
 ## How it works
 
-atmos-control captures your system audio, feeds it into an app-hosted `AUSpatialMixer`, and sends
-the spatialized binaural result to your headphones. The mixer is the same Apple engine behind
-system Spatial Audio, so when you use AirPods with a scanned personal profile, personalized HRTF and
-head tracking engage — and atmos-control exposes the full renderer surface that Apple normally
-reduces to one switch.
+```
+system audio ─▶ capture ─▶ 10-band EQ (2 ch) ─▶ STFT upmixer (2→6/12 ch) ─▶ AUSpatialMixer ─▶ headphones
+                                 F1/F2                    F4                   F5 (binaural)
+```
+
+The EQ runs on the **stereo** signal before the upmixer — one filter pass instead of six or twelve,
+and the upmixer's direct/ambient analysis then sees the signal you actually want to hear.
 
 <p align="center">
   <img src="docs/assets/signal-path.svg" alt="Signal path: system audio capture into AUSpatialMixer, personalized binaural output to headphones" width="820">
@@ -32,55 +56,255 @@ reduces to one switch.
 
 1. **Capture** — the system mix is read via a process tap (default) or routed through the
    atmos-control virtual audio device (loopback modes).
-2. **Spatialize** — each channel or source is placed at its azimuth, elevation, and distance and
-   rendered through Apple's `AUSpatialMixer` (personalized HRTF when available, generic HRTF
-   otherwise).
-3. **Track** — with AirPods, the head pose continuously updates so the soundstage stays fixed in the
+2. **Equalize** — ten fixed bands plus an automatic pre-amp, applied to the stereo capture.
+3. **Upmix** (optional) — a short-time Fourier transform splits the stereo signal into *direct*
+   sound (correlated, pannable) and *ambience* (uncorrelated), then distributes them across 6 or 12
+   virtual speakers.
+4. **Spatialize** — each channel/source is placed at its azimuth, elevation and distance and
+   rendered through Apple's `AUSpatialMixer` (personalized HRTF when available, generic otherwise).
+5. **Track** — with AirPods, head pose continuously updates so the soundstage stays fixed in the
    world while your head moves.
-4. **Output** — the binaural result plays to your headphones. Nothing is sent anywhere; all capture
-   and processing is local.
+6. **Output** — the binaural result plays to your headphones. Nothing leaves the machine.
 
 ## Capture modes
 
-atmos-control offers three ways to get audio into the engine. The default **Personalized** mode
-needs no driver and is the only mode where personalized HRTF can engage; the two loopback modes
-require the optional virtual audio device.
-
-<p align="center">
-  <img src="docs/assets/modes.svg" alt="The three capture modes: Personalized process tap, Surround 7.1.4, and Stereo virtual device" width="820">
-</p>
-
 | Mode | What it does | Driver needed | System Spatial Audio | Apple Music Dolby Atmos |
 |---|---|---|---|---|
-| Personalized (headphones) | Captures the system mix via a process tap and applies personalized, head-tracked binaural rendering. Default mode. | No | Off | Off |
-| Surround 7.1.4 | Routes true 12-channel multichannel through the virtual device and places each channel at its canonical speaker angle. | Yes | Off | Automatic |
-| Stereo (virtual device) | Routes all audio through the atmos-control virtual device. Works with any source, but rendering is generic (personalized HRTF cannot engage). | Yes | Off | Off |
+| **Personalized (headphones)** | Captures the system mix via a process tap and applies personalized, head-tracked binaural rendering. Default. | No | Off | Off |
+| **Surround 7.1.4** | Routes true 12-channel multichannel through the virtual device and places each channel at its canonical speaker angle. | Yes | Off | Automatic |
+| **Stereo (virtual device)** | Routes all audio through the atmos-control virtual device. Works with any output, but rendering is generic. | Yes | Off | Off |
 
-Notes:
+- Personalized HRTF only engages in **Personalized** mode, with AirPods that have a scanned personal
+  profile, and while system Spatial Audio is off.
+- The upmixer needs a **stereo** capture, so it is available in Personalized and Stereo modes —
+  not in Surround 7.1.4 (which is already multichannel).
 
-- The default Personalized mode needs no driver. Only Surround 7.1.4 and Stereo (virtual
-  device) require the driver, because they capture through the virtual output device.
-- Personalized HRTF only engages in Personalized mode with AirPods that have a scanned
-  personal profile. The panel shows a "Personalized" status that reads active when the
-  Apple engine confirms your personal HRTF is in use.
+## The menu-bar panel
 
-## Screenshots
+```
+ ((•)) atmos-control                    [ ● ]     ← power
+ ─────────────────────────────────────────────
+  Engine  On            Output  AirPods Pro
+  Personalized  On      Head track  Tracking
+ ─────────────────────────────────────────────
+  Equalizer                            [ ● ]
+     Preset   [ Rock •              ▾ ]
+ ─────────────────────────────────────────────
+  Spatial audio                        [ ● ]
+     Preset   [ Small Room           ▾ ]
+     Upmix to surround                [ ● ]
+ ─────────────────────────────────────────────
+  AirPods Pro — unsaved changes                  ← only when the live state
+  [ Save for this device ]  [ Revert ]             differs from the profile
+ ─────────────────────────────────────────────
+  Open Full Controls…                   Quit
+```
+
+A `•` after a preset name means the live state no longer matches the stored preset. Editing EQ
+curves, saving presets and everything else lives in **Full Control** (the settings window).
 
 <p align="center">
-  <img src="docs/assets/panel.png" alt="atmos-control menu-bar panel with the spatial visualizer and stereo meters" width="360">
+  <img src="docs/assets/settings.png" alt="atmos-control settings window" width="720">
 </p>
 
-The compact menu-bar panel: a power toggle, live status strip (engine, output device, personalized
-HRTF, head tracking), the spatial visualizer (azimuth radar + elevation gauge), stereo meters, and
-quick controls.
+*(The screenshots in `docs/assets/` were taken before this fork's UI changes.)*
 
-<p align="center">
-  <img src="docs/assets/settings.png" alt="atmos-control settings window with the draggable soundstage source and per-source controls" width="720">
-</p>
+---
 
-The settings window: the full renderer surface — output device and algorithm, a draggable soundstage
-source with per-source azimuth/elevation/distance/gain, personalization and head-tracking controls,
-rendering flags, and full meters.
+# Settings reference
+
+Every setting, what changing it does, and when you'd want to.
+
+### A note on the sliders
+
+All sliders in this fork are **click-to-step**: clicking the track to the right of the knob
+increases the value by exactly one unit, clicking to the left decreases it. One "unit" is the
+smallest change the readout can show (0.1 dB on the EQ, 0.01 on `Center strength`, 1° on
+`Azimuth`, …). Dragging still works as usual; double-clicking a numeric readout resets that value.
+
+## Output
+
+| Setting | What it does | Change it when |
+|---|---|---|
+| **Audio capture** | Picks how audio gets into the engine (see [Capture modes](#capture-modes)). Rebuilds the whole graph. | You want true multichannel from Apple Music (Surround 7.1.4), or your output isn't headphones (Stereo virtual device). Otherwise leave on Personalized. |
+| **Output device** | Where the rendered audio is played. "Follow system default" tracks whatever macOS is using. | You want atmos-control pinned to one device regardless of the system default. |
+| **Output type** | Tells the renderer what it is rendering *for*: Headphones / Built-in Speakers / External Speakers. Headphones = binaural HRTF; the speaker types switch to crosstalk-aware virtualization. | Only if you route the result to speakers. Personalized HRTF requires **Headphones**. |
+| **Signal path** | Read-only: the live chain (capture → EQ → upmix → mixer → device). | Diagnostics only. |
+
+## Equalizer
+
+| Setting | What it does | Change it when |
+|---|---|---|
+| **Equalizer** (switch) | Bypasses the whole EQ unit (not a per-band reset — your curve is kept). | A/B-ing the EQ against flat. |
+| **Preset** | Loads a stored curve + pre-amp. `Flat` is built in and can't be edited; `•` marks unsaved edits. The `…` menu holds Save, Save as…, Rename, Delete. | Per-genre or per-headphone curves. |
+| **Band faders** (32, 64, 125, 250, 500, 1k, 2k, 4k, 8k, 16k Hz) | ±12 dB on a 1-octave parametric band. Click above/below the knob for 0.1 dB; double-click to zero that band. | Tame a resonance, add low shelf-ish warmth, soften sibilance (4–8 kHz), etc. |
+| **Pre-amp ▸ Auto** | Analyses the combined response and applies `−max(0, peak)` so the loudest point of your curve lands at 0 dB. Prevents clipping before the spatializer. | Leave it on. This is the safe default. |
+| **Pre-amp ▸ Manual** | You set the headroom yourself (−24 … +12 dB, 0.1 dB steps). | You want extra level and know your curve won't clip, or you want to match loudness while A/B-ing. |
+| **Flatten** | Zeroes all ten bands. | Starting over. |
+| *curve peak* readout | How far the current curve overshoots 0 dB — the number Auto pre-amp is cancelling. | Diagnostics. |
+
+## Upmix
+
+Turning this on or off rebuilds the audio graph, so expect a brief gap in the audio.
+
+| Setting | What it does | Change it when |
+|---|---|---|
+| **Upmix stereo to surround** | Runs the STFT upmixer and switches the spatial mixer to 6 or 12 virtual speakers. | You want music/video to open up beyond the two front points. Off = the classic two-point stereo soundstage. |
+| **Target layout** | `5.1` (L C R LFE Ls Rs) or `7.1.4` (adds rear surrounds and four height speakers). | 7.1.4 for films and anything with vertical ambience; 5.1 is what Apple's own "Spatialize Stereo" does and is lighter on CPU. |
+| **Center strength** | 0 … 1.5 — how much of the correlated centre (vocals, dialogue) is pulled out of L/R into the centre speaker. | Raise it if vocals feel vague between the ears; lower it if the mix sounds mono-ish and narrow. |
+| **Surround level** | −24 … +6 dB on the surround speakers. | Raise for a bigger, more enveloping ambience; lower if the back of the room draws attention to itself. |
+| **Height level** | −24 … +6 dB on the four height speakers (7.1.4 only). | Raise for more "ceiling" air; the default −6 dB keeps heights as a hint rather than an effect. |
+| **Decorrelation** | 0 … 1 — phase decorrelation applied to the ambient component (group delay bounded to ±2.5 ms, so transients stay intact). | Higher = wider, more diffuse ambience. Lower it if cymbals or applause start to smear. |
+| **Ambient bias** | −12 … +12 dB — tilts the direct/ambient split. Negative favours direct sound. | Negative for focus and intelligibility; positive for a more reverberant, "in the room" feel. |
+| **Surround spread** | 0.5 … 1.3× — scales the surround speaker angles. | Narrower (<1) for a tighter stage, wider (>1) for a larger room. |
+| **LFE** | `Off` or `150 Hz low-pass`. Off by default: the low end is already in L/R, and the spatial mixer bypasses the LFE bus anyway. | Effectively diagnostic — leave Off. |
+| **FFT size** | 1024 (21 ms @48 kHz) or 2048 (43 ms). Larger = finer frequency resolution, better separation, more latency. | 2048 for music where separation matters; 1024 if you notice lip-sync drift on video. |
+| **Added latency** | Read-only: the algorithmic delay the upmixer adds. | Audio lagging video is tolerated up to roughly 125 ms, so both sizes are safe — but this is the number to check. |
+
+## Soundstage
+
+| Setting | What it does | Change it when |
+|---|---|---|
+| **Radar** | Drag the dot to set azimuth/distance directly. | Faster than the sliders. |
+| **Source mode** | How the capture is presented to the renderer: `Stereo Points` (L/R as two virtual speakers), `Stereo Bed`, `Mono Point`, `Surround 7.1.4`, … When Upmix is on, the upmixer owns this and the picker is disabled. | Rarely. `Stereo Points` is the normal choice. |
+| **Azimuth** | −180 … +180° — rotates the whole stage around you. | Offsetting the stage; 0° is dead ahead. |
+| **Elevation** | −90 … +90° — raises/lowers the stage. | A few degrees up can lift a "too low" image. |
+| **Distance** | 0.35 … 6 m — how far the virtual speakers sit from you. Interacts with the distance model and reverb below. | **The main "room size" control.** Closer = drier, more intimate, more in-head; farther = more distant and reverberant. |
+| **Gain** | −40 … +12 dB — source gain into the renderer. | Compensating the level you lose by moving the source away (see the reference presets below). |
+| **Stereo width** | 0 … 90° — the angle between the two virtual front speakers (`Stereo Points` only). | 30–40° is the classic stereo triangle; wider pulls the image apart, narrower collapses it towards mono. |
+| **Reset soundstage** | Back to the defaults. | — |
+
+## Personalization
+
+| Setting | What it does | Change it when |
+|---|---|---|
+| **Head tracking** | Keeps the soundstage fixed in the world as you move your head (AirPods only). | Off if you listen while walking and the stage swimming bothers you. |
+| **Personalized HRTF** | `Auto` / `On` / `Off` — whether Apple's scanned personal profile is used. Needs Personalized capture + Headphones output type + the Automatic/Output-type algorithm. | `Auto` is right for almost everyone. |
+| **Status (3116)** | Read-only: what Apple's engine reports about personalization right now. | Verifying your personal profile actually engaged. |
+
+> Control Center ▸ Sound ▸ AirPods ▸ **Spatial Audio must be OFF** while atmos-control runs,
+> otherwise audio is spatialized twice.
+
+## Rendering (Advanced)
+
+| Setting | What it does | Change it when |
+|---|---|---|
+| **Algorithm** | `Automatic (by device)` picks per output device: AirPods get Apple's output-type path (so personalized HRTF can engage), everything else gets HRTF HQ. `HRTF` / `HRTF HQ` pin it; `Output type` is Apple's automatic path. | Pick **HRTF HQ** when you want the internal reverb and the full distance model — they are inert under Automatic/Output type. Pick **Automatic** when personalized HRTF matters more. |
+| **Inter-aural delay** | Models the time difference between your ears, not just level. | Leave on; it's most of the externalization. |
+| **Distance attenuation** | Turns the distance→loudness model on. | Off makes `Distance` purely tonal/spatial with no level change. |
+| **Attenuation curve** | `Power` / `Exponential` / `Inverse` / `Linear` — how loudness falls with distance. `Inverse` is the physical 1/r law. | Mostly taste; `Inverse` is the realistic default. |
+| **Reference distance** | 0.1 … 4 m — the distance at which there is no attenuation. | Raise it if moving the source away kills the level too quickly. |
+| **Max distance** | 1 … 20 m — where attenuation stops increasing. | Rarely. |
+| **Max attenuation** | 0 … 60 dB — the cap on distance attenuation. | Lower it if distant placements get too quiet. |
+| **Room reverb** | The mixer's internal early-reflection/reverb engine. **Audible under HRTF / HRTF HQ only** — the controls grey out under Automatic/Output type (your settings are kept). | On for a sense of room; off for a dry, studio-style image. |
+| **Room size** | `Small` / `Medium` / `Large`. | Small = tight and close; Large = concert-hall tails. |
+| **Reverb blend** | 0 … 100 % wet. | **Use single digits.** Even 1–2 % is audible here; 10 % already sounds like an effect. |
+| **Reset rendering** | Back to the defaults. | — |
+
+(`globalReverbGain`, −3 dB, is written to the preset file but has no UI control.)
+
+## Spatial presets
+
+A spatial preset stores **everything above except the equalizer and the capture mode** — soundstage,
+personalization, rendering, reverb *and* the upmix settings (including whether upmix is on). Save,
+Save as…, Rename, Delete from the `…` menu; `•` marks unsaved edits. Selecting a preset applies it
+immediately, including switching the upmixer in or out.
+
+## Device profiles
+
+When the output device changes, atmos-control applies that device's profile.
+
+| Setting | What it does |
+|---|---|
+| **Mode ▸ Process** | Run the engine on this device with the EQ/spatial choices below. |
+| **Mode ▸ Bypass** | Don't touch this device at all — no tap, no rendering. Use for an AV receiver or TV that should get the original multichannel stream untouched. |
+| **Equalizer / EQ preset** | What the EQ does when this device appears. |
+| **Spatial audio / Spatial preset** | What the renderer does when this device appears. |
+| **Apply automatically** | Off = remember the device but never change anything when it connects. |
+| **Any other device** | The fallback profile for devices with no entry of their own. |
+
+Manual changes you make while a device is active are **session-scoped**: the panel shows
+`<device> — unsaved changes` with **Save for this device** / **Revert**. Nothing is written to the
+profile until you press Save.
+
+## General
+
+| Setting | What it does |
+|---|---|
+| **Launch at login** | Registers the app as a login item via `SMAppService`. |
+| **Settings file** | `~/Library/Application Support/atmos-control/settings.json` — settings, presets and profiles, written about a second after you stop making changes. |
+
+## Levels
+
+Read-only meters and engine counters (peak L/R, per-channel surround meters, ring fill,
+captured/played frame counters) for diagnostics.
+
+---
+
+# Reference values
+
+Two working presets, as they appear in the UI. Both are tuned for AirPods with **HRTF HQ** (not
+Automatic) — that is what makes the internal reverb and the distance model audible. Use them as a
+starting point, then move `Distance`, `Gain` and `Reverb blend` together.
+
+### Common to both
+
+| Section | Setting | Value |
+|---|---|---|
+| Output | Output type | Headphones |
+| Equalizer | Equalizer / Preset / Pre-amp | On / Flat / Auto |
+| Soundstage | Source mode | Stereo Points (upmix takes over while it is on) |
+| Soundstage | Azimuth / Elevation | 0° / 0° |
+| Soundstage | Stereo width | 35° |
+| Personalization | Head tracking | On |
+| Personalization | Personalized HRTF | Auto |
+| Rendering | Algorithm | **HRTF HQ** |
+| Rendering | Inter-aural delay | On |
+| Rendering | Distance attenuation | On |
+| Rendering | Attenuation curve | Inverse |
+| Rendering | Reference distance | 1.00 m |
+| Rendering | Max distance | 6.0 m |
+| Rendering | Max attenuation | 30 dB |
+| Rendering | Room reverb | On |
+| Rendering | Reverb blend | 1 % |
+| Upmix | Upmix stereo to surround | On |
+| Upmix | FFT size | 2048 |
+| Upmix | Surround level | +0 dB |
+| Upmix | Height level | −6 dB |
+| Upmix | LFE | Off |
+
+### "Small Room" — near-field, 5.1
+
+| Section | Setting | Value |
+|---|---|---|
+| Soundstage | **Distance** | **1.40 m** |
+| Soundstage | **Gain** | **+5 dB** |
+| Rendering | **Room size** | **Small** |
+| Upmix | **Target layout** | **5.1** |
+| Upmix | Center strength | 1.35 |
+| Upmix | Decorrelation | 0.65 |
+| Upmix | Ambient bias | −3 dB |
+| Upmix | Surround spread | 1.00× |
+
+Close, focused, slightly dry — good for vocals, podcasts and anything where intelligibility matters.
+
+### "Middle Room" — mid-field, 7.1.4
+
+| Section | Setting | Value |
+|---|---|---|
+| Soundstage | **Distance** | **1.80 m** |
+| Soundstage | **Gain** | **+9 dB** |
+| Rendering | **Room size** | **Medium** |
+| Upmix | **Target layout** | **7.1.4** |
+| Upmix | Center strength | 1.35 |
+| Upmix | Decorrelation | 0.80 |
+| Upmix | Ambient bias | −3 dB |
+| Upmix | Surround spread | 1.00× |
+
+A step back into a larger room with height channels — films, live recordings, anything atmospheric.
+Note how `Gain` rises with `Distance`: with the inverse curve, +0.4 m costs roughly 4 dB.
+
+---
 
 ## Requirements
 
@@ -92,33 +316,26 @@ rendering flags, and full meters.
 
 ## Install
 
-Clone the repo and run the installer:
-
 ```bash
-git clone <repo-url> atmos-control
+git clone <your-fork-url> atmos-control
 cd atmos-control
 ./install.sh
 ```
 
-`install.sh` is idempotent — re-running it rebuilds and replaces the installed app.
-It builds the package, assembles `dist/atmos-control.app`, and copies it into
-`/Applications`. It never changes your default output device and never touches system
-audio locations.
+`install.sh` is idempotent — re-running it rebuilds and replaces the installed app. It builds the
+package, assembles `dist/atmos-control.app`, and copies it into `/Applications`. It never changes
+your default output device.
 
-To also install the optional audio driver (only needed for the two loopback capture
-modes — see Capture modes), add the flag:
+The optional HAL driver is only needed for the two loopback capture modes:
 
 ```bash
 ./install.sh --with-driver
 ```
 
-The driver install is privileged: it copies the driver into
-`/Library/Audio/Plug-Ins/HAL` and restarts Core Audio, which makes audio devices blink
-out for about a second. You will be prompted for your admin password.
+The driver install is privileged: it copies the driver into `/Library/Audio/Plug-Ins/HAL` and
+restarts Core Audio, which makes audio devices blink out for about a second.
 
 ### Manual install (step by step)
-
-If you prefer to run each step yourself instead of `./install.sh`:
 
 | Step | Command |
 |---|---|
@@ -136,109 +353,91 @@ If you prefer to run each step yourself instead of `./install.sh`:
 open /Applications/atmos-control.app
 ```
 
-atmos-control is a menu-bar app (`LSUIElement`) — it has no Dock icon. Look for its glyph
-at the top-right of the menu bar and click it to open the control panel.
-
-On the first engine start, macOS asks for the audio-capture permission (it appears as a
-microphone/TCC prompt). Grant it — atmos-control needs this permission to read the system
-audio it spatializes. Nothing is sent anywhere; capture is local.
+atmos-control is a menu-bar app (`LSUIElement`) — no Dock icon. On the first engine start, macOS
+asks for the system-audio-recording permission. Grant it; capture is local and nothing is uploaded.
+If the engine runs but everything is silent, the panel says so and offers a shortcut to
+System Settings ▸ Privacy & Security ▸ Screen & System Audio Recording.
 
 ## Before you listen
 
-- Turn off system Spatial Audio. Control Center ▸ Sound ▸ AirPods ▸ Spatial Audio should be
-  OFF while atmos-control runs — otherwise audio is spatialized twice (the OS and atmos-control
-  both apply an HRTF).
-- Apple Music ▸ Dolby Atmos setting. In Personalized / Stereo capture, set Music ▸ Settings ▸
-  Playback ▸ Dolby Atmos to Off (atmos-control does the spatialization). In Surround 7.1.4
-  capture, set it to Automatic so Music emits true multichannel for atmos-control to place.
+- **Turn off system Spatial Audio** (Control Center ▸ Sound ▸ AirPods ▸ Spatial Audio), otherwise
+  audio is spatialized twice.
+- **Apple Music ▸ Dolby Atmos**: Off for Personalized/Stereo capture; Automatic for Surround 7.1.4.
 
-## Update
+## Update / uninstall
 
 ```bash
-git pull
-./install.sh          # add --with-driver if you use the loopback modes
+git pull && ./install.sh        # add --with-driver if you use the loopback modes
+./uninstall.sh                  # removes the app
+./uninstall.sh --with-driver    # also removes the driver (privileged; Core Audio restarts)
 ```
 
-Re-running the installer rebuilds and replaces the installed app in place.
-
-## Uninstall
-
-```bash
-./uninstall.sh                 # removes the app from /Applications
-./uninstall.sh --with-driver   # also removes the driver (privileged; Core Audio restarts)
-```
-
-Nothing else is left behind: atmos-control installs no LaunchAgents or LaunchDaemons and
-writes no preferences of its own (it only reads Apple Music's Dolby Atmos setting while
-running, and never modifies it). There is no defaults domain to clean up.
+This fork stores settings, presets and device profiles in
+`~/Library/Application Support/atmos-control/` — delete that folder to reset everything. If you
+enabled **Launch at login**, turn it off before uninstalling (or remove the entry in
+System Settings ▸ General ▸ Login Items).
 
 ## Troubleshooting
 
-- No sound after quitting, or the default device is stuck on the virtual sink. If you used a
-  loopback mode and audio is silent, your system default output may be stranded on the
-  atmos-control virtual device. Set it back in Control Center ▸ Sound (or System Settings ▸
-  Sound) to your headphones or speakers. atmos-control never changes your default device on
-  its own.
-- Driver not listed / loopback modes disabled. If Surround 7.1.4 or Stereo (virtual device)
-  are unavailable, the driver is not installed. Install it:
-
-  ```bash
-  ./install.sh --with-driver
-  ```
-
-  or run the manual driver commands in the table above. A Core Audio restart is required for
-  the system to see the driver.
-- Personalized HRTF status. The panel's "Personalized" indicator reflects Apple's engine
-  signal (property 3116). It reads active only in Personalized mode, with AirPods that have a
-  scanned personal Spatial Audio profile, and while system Spatial Audio is off. If it reads
-  inactive, rendering is still binaural but uses the generic HRTF.
+- **No sound at all, or sound only when you change a setting.** Usually the system-audio-recording
+  permission: the tap returns silence while reporting success. The panel detects this (no non-zero
+  sample after several seconds) and offers the Privacy settings shortcut. Grant it, then toggle the
+  power switch.
+- **"Audio stalled — the engine restarted itself."** The IO watchdog noticed frames stopped moving
+  (device reset, aggregate lost a sub-device, tap died) and rebuilt the graph. One-off messages are
+  normal after a device hiccup; repeated ones mean the device or driver is unstable.
+- **Default device stuck on the virtual sink** after using a loopback mode: set it back in
+  Control Center ▸ Sound.
+- **Loopback modes greyed out**: the driver isn't installed — `./install.sh --with-driver`.
+- **Personalized reads "Generic"**: it needs Personalized capture + Headphones output type +
+  the Automatic/Output-type algorithm + AirPods with a scanned profile. Rendering is still binaural,
+  just with the generic HRTF.
+- **Reverb controls greyed out**: you're on the Automatic or Output-type algorithm, where the
+  internal reverb is inert. Switch to HRTF or HRTF HQ.
 
 ## Development
 
-The package builds several targets beyond the app (see `Package.swift`). These are the
-CLI/debug harnesses kept from earlier phases.
-
-Phase 0 spike — validates that personalized HRTF + AirPods head tracking engages inside an
-app-hosted `AUSpatialMixer` for an unentitled/self-signed binary:
-
 ```bash
-swift run Phase0Spike            # play test tone through the spatial mixer to default output
-swift run Phase0Spike <file.wav> # spatialize a real audio file (subjective A/B listen test)
+swift build -c release          # build everything
+bash App/build-app.sh release   # app bundle into dist/
+ATMOS_PREVIEW=1 open -n dist/atmos-control.app   # panel in a normal window
 ```
 
-The spike prints whether `kAudioUnitProperty_SpatialMixerAnyInputIsUsingPersonalizedHRTF`
-(3116) reads true — the programmatic signal that the user's personal HRTF profile is in use.
+Layout:
 
-Environment variables (Phase0Spike / AtmosDaemon):
+| Path | What's in it |
+|---|---|
+| `Sources/SpatialEngine/` | The engine library: `SpatialEngine` (graph + lifecycle), `Audio` (realtime callbacks, SPSC ring, `AUSpatialMixer`), `EqualizerUnit` (`AUNBandEQ`), `STFTUpmixer` + `Decorrelator`, `ProcessTap`, `Devices`, `ConfigCodable` |
+| `Sources/AtmosControlApp/` | The SwiftUI app: `EngineController` (the view model and all orchestration), `PanelView`, `SettingsView`, `EQView`, `UpmixView`, `ProfilesView`, `SettingsStore`, `StepSlider` |
+| `Driver/` | The optional HAL virtual device |
+| `App/build-app.sh` | Bundle assembly + ad-hoc signing |
+| `docs/PLAN.md` | Upstream architecture plan |
+
+Other targets kept from upstream: `Phase0Spike` (validates that personalized HRTF + head tracking
+engage in an app-hosted `AUSpatialMixer`), `AtmosDaemon` (CLI over the engine with a 1 Hz
+diagnostic), `TapSpike` (process-tap capture spike). Environment variables for the spikes:
 
 | Variable | Values (default in bold) | AU property |
 |---|---|---|
 | `SECONDS` | integer > 0 (**25**) | run duration |
-| `SWEEP` | **0** / 1 | sweep azimuth -90 -> +90 degrees |
-| `OUTPUT_TYPE` | **headphones** / builtin / external | `SpatialMixerOutputType` (3100) -> 1 / 2 / 3 |
-| `HRTF_MODE` | **auto** / on / off | `SpatialMixerPersonalizedHRTFMode` (3113) -> 2 / 1 / 0 |
-| `ALGO` | **useoutputtype** / hrtf / hrtfhq | `SpatializationAlgorithm` -> 7 / 2 / 6 |
+| `SWEEP` | **0** / 1 | sweep azimuth −90 → +90 degrees |
+| `OUTPUT_TYPE` | **headphones** / builtin / external | `SpatialMixerOutputType` (3100) → 1 / 2 / 3 |
+| `HRTF_MODE` | **auto** / on / off | `SpatialMixerPersonalizedHRTFMode` (3113) → 2 / 1 / 0 |
+| `ALGO` | **useoutputtype** / hrtf / hrtfhq | `SpatializationAlgorithm` → 7 / 2 / 6 |
 
-Example invocations:
+## Acknowledgements
 
-```bash
-# Core-tier test — generic HRTF, any headphones (3116 should read NO; binaural still active)
-HRTF_MODE=off swift run Phase0Spike
+This project is a fork of **[atmos-control](https://github.com/yukij3/atmos-control)** by
+**dmitrijtretakov** ([@yukij3](https://github.com/yukij3)). The hard parts — getting Apple's
+`AUSpatialMixer` to host personalized HRTF and AirPods head tracking from an unentitled app,
+the muting process-tap capture path, the realtime graph and SPSC ring, the HAL driver with its
+7.1.4 channel layout, and the UI language this fork follows — are all upstream work. Everything
+here is built on top of it. Thank you.
 
-# Premium-tier test — personalized HRTF with auto fallback, AirPods connected
-OUTPUT_TYPE=headphones HRTF_MODE=auto SECONDS=30 swift run Phase0Spike
+The upmixer's design was informed by an analysis of Apple's own "Spatialize Stereo"
+(`ScottySTFTUpmixer`: 1024-frame STFT, 5.1 `MPEG_5_1_A` output, 150 Hz LFE low-pass), which this
+fork follows in shape while adding a 7.1.4 option and exposing the separation parameters.
 
-# Speaker-virtualization test — built-in speakers or external (3116=NO is correct here)
-OUTPUT_TYPE=builtin swift run Phase0Spike
+## License
 
-# AirPods with personal profile, force personalization ON (no fallback)
-OUTPUT_TYPE=headphones HRTF_MODE=on ALGO=hrtfhq swift run Phase0Spike
-```
-
-Other targets: `AtmosDaemon` (thin CLI over the engine, prints a 1 Hz diagnostic),
-`TapSpike` (process-tap capture spike), `SpatialEngine` (the shared engine library).
-Full architecture plan: [`docs/PLAN.md`](docs/PLAN.md).
-
-The app bundle is produced by `App/build-app.sh` (ad-hoc signed, `LSUIElement`); it writes
-only to `dist/` and touches no system locations. Preview the panel in a window with
-`ATMOS_PREVIEW=1 open -n dist/atmos-control.app`.
+MIT, same as upstream. Copyright (c) 2026 dmitrijtretakov — see [LICENSE](LICENSE).
