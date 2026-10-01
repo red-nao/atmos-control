@@ -4,6 +4,10 @@
 // parameter in a 300 pt track a game of chance. This one keeps dragging continuous but
 // turns a *click* into a single step: click right of the knob = +1 step, left = −1 step.
 // (Direct "jump to the clicked position" is gone on purpose.)
+//
+// Visually it follows the system slider — capsule track, pill handle with a soft shadow,
+// filled portion behind the handle — just drawn on the app's instrument cyan instead of
+// the system accent.
 
 import SwiftUI
 
@@ -17,33 +21,34 @@ struct StepSlider: View {
     /// shouldn't restart the graph on every intermediate value.
     var onCommit: (() -> Void)? = nil
 
+    @Environment(\.isEnabled) private var isEnabled
     @State private var dragging = false
+    @State private var hovering = false
 
-    private let trackHeight: CGFloat = 4
-    private let knobSize: CGFloat = 15
+    // System-slider metrics (macOS 26): a slim capsule track with a pill handle that is
+    // wider than it is tall.
+    private let trackHeight: CGFloat = 6
+    private let knobW: CGFloat = 26
+    private let knobH: CGFloat = 18
 
     private var span: Double { max(range.upperBound - range.lowerBound, .leastNonzeroMagnitude) }
 
     var body: some View {
         GeometryReader { geo in
             let w = geo.size.width
-            let usable = max(w - knobSize, 1)
+            let usable = max(w - knobW, 1)
             let frac = CGFloat((clamp(value) - range.lowerBound) / span)
-            let x = knobSize / 2 + usable * frac
+            let x = knobW / 2 + usable * frac
 
             ZStack(alignment: .leading) {
-                Capsule()
-                    .fill(Color.primary.opacity(0.14))
+                Capsule(style: .continuous)
+                    .fill(Color.primary.opacity(0.12))
                     .frame(height: trackHeight)
-                Capsule()
-                    .fill(Color.accentColor)
+                Capsule(style: .continuous)
+                    .fill(Color.instrument.opacity(isEnabled ? 1 : 0.4))
                     .frame(width: max(x, trackHeight), height: trackHeight)
-                Circle()
-                    .fill(Color(nsColor: .controlColor))
-                    .overlay(Circle().strokeBorder(Color.black.opacity(0.22), lineWidth: 0.5))
-                    .shadow(color: .black.opacity(0.25), radius: 0.8, y: 0.5)
-                    .frame(width: knobSize, height: knobSize)
-                    .offset(x: x - knobSize / 2)
+                knob
+                    .offset(x: x - knobW / 2)
             }
             .frame(maxHeight: .infinity)
             .contentShape(Rectangle())
@@ -64,8 +69,10 @@ struct StepSlider: View {
                         onCommit?()
                     }
             )
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: dragging)
         }
-        .frame(height: 20)
+        .frame(height: 22)
         .accessibilityElement()
         .accessibilityValue(Text("\(value)"))
         .accessibilityAdjustableAction { direction in
@@ -76,6 +83,22 @@ struct StepSlider: View {
             }
             onCommit?()
         }
+    }
+
+    private var knob: some View {
+        RoundedRectangle(cornerRadius: knobH / 2, style: .continuous)
+            .fill(Color(nsColor: .controlColor))
+            .overlay(
+                RoundedRectangle(cornerRadius: knobH / 2, style: .continuous)
+                    .strokeBorder(Color.black.opacity(0.12), lineWidth: 0.5)
+            )
+            // Two shadows: a tight contact one and a wider soft one — that pairing is what
+            // makes the system handle read as a physical cap rather than a sticker.
+            .shadow(color: .black.opacity(dragging ? 0.28 : 0.20), radius: dragging ? 2.5 : 1.5, y: 1)
+            .shadow(color: .black.opacity(0.08), radius: 4, y: 2)
+            .frame(width: knobW, height: knobH)
+            .scaleEffect(dragging ? 1.04 : (hovering ? 1.02 : 1))
+            .opacity(isEnabled ? 1 : 0.6)
     }
 
     private func clamp(_ v: Double) -> Double { min(max(v, range.lowerBound), range.upperBound) }
@@ -89,7 +112,7 @@ struct StepSlider: View {
     }
 
     private func set(fromX x: CGFloat, usable: CGFloat) {
-        let t = Double(min(max((x - knobSize / 2) / usable, 0), 1))
+        let t = Double(min(max((x - knobW / 2) / usable, 0), 1))
         let v = snap(range.lowerBound + t * span)
         if v != value { onChange(v) }
     }
