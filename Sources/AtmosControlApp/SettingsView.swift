@@ -77,7 +77,7 @@ struct SettingsView: View {
         } header: {
             Text("Output")
         } footer: {
-            Text(controller.captureChoice.subtitle)
+            SectionFootnote(controller.captureChoice.subtitle)
         }
     }
 
@@ -106,7 +106,7 @@ struct SettingsView: View {
         } header: {
             Text("General")
         } footer: {
-            Text("Presets and settings are saved automatically, about a second after you stop changing them.")
+            SectionFootnote("Presets and settings are saved automatically, about a second after you stop changing them.")
         }
     }
 
@@ -146,7 +146,7 @@ struct SettingsView: View {
         } header: {
             Text("Soundstage")
         } footer: {
-            Text("Drag the source dot on the radar, or use the sliders. Double-click a readout to reset that value.")
+            SectionFootnote("Drag the source dot on the radar, or use the sliders. Double-click a readout to reset that value.")
         }
         .disabled(!controller.config.spatialize)
     }
@@ -188,7 +188,7 @@ struct SettingsView: View {
         } header: {
             Text("Personalization")
         } footer: {
-            Text("Control Center ▸ Sound ▸ AirPods ▸ Spatial Audio should be OFF while atmos-control runs — otherwise audio is spatialized twice.")
+            SectionFootnote("Control Center ▸ Sound ▸ AirPods ▸ Spatial Audio should be OFF while atmos-control runs — otherwise audio is spatialized twice.")
         }
     }
 
@@ -445,5 +445,25 @@ struct SurroundMeterRow: View {
             .frame(height: 78)
             .accessibilityLabel("Surround channel levels")
         }
+    }
+}
+
+// MARK: - Section footnote
+
+/// Section footers, styled exactly like the inline notes *inside* a Section: secondary
+/// grey, footnote size, left-aligned, wrapping instead of truncating. Without the explicit
+/// frame the grouped Form centres a short footer under the box, which reads as a different
+/// kind of message than the same sentence placed one row higher.
+struct SectionFootnote: View {
+    private let text: String
+    init(_ text: String) { self.text = text }
+
+    var body: some View {
+        Text(text)
+            .font(.footnote)
+            .foregroundStyle(.secondary)
+            .multilineTextAlignment(.leading)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

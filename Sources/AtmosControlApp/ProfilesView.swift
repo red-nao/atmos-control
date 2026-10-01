@@ -70,7 +70,7 @@ struct SpatialPresetSection: View {
         } header: {
             Text("Spatial presets")
         } footer: {
-            Text("A spatial preset stores everything above except the equalizer and the capture mode. Edits show a • until you save them.")
+            SectionFootnote("A spatial preset stores everything above except the equalizer and the capture mode. Edits show a • until you save them.")
         }
     }
 
@@ -96,7 +96,7 @@ struct DeviceProfilesSection: View {
         } header: {
             Text("Device profiles")
         } footer: {
-            Text("When the output device changes, atmos-control applies that device's profile. Bypass means the engine stops entirely, so an AV receiver or TV gets the original multichannel audio untouched.")
+            SectionFootnote("When the output device changes, atmos-control applies that device's profile. Bypass means the engine stops entirely, so an AV receiver or TV gets the original multichannel audio untouched.")
         }
     }
 

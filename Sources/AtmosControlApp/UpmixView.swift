@@ -85,7 +85,7 @@ struct UpmixSection: View {
         } header: {
             Text("Upmix")
         } footer: {
-            Text("Splits the stereo signal into direct sound and ambience with a short-time Fourier transform, then places them on \(up.layout == .surround714 ? "twelve" : "six") virtual speakers before binaural rendering. Turning it on or off rebuilds the audio graph, so expect a brief gap.")
+            SectionFootnote("Splits the stereo signal into direct sound and ambience with a short-time Fourier transform, then places them on \(up.layout == .surround714 ? "twelve" : "six") virtual speakers before binaural rendering. Turning it on or off rebuilds the audio graph, so expect a brief gap.")
         }
     }
 

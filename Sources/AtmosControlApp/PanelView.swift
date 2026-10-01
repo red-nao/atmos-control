@@ -44,9 +44,6 @@ struct PanelView: View {
         .scrollIndicators(.never)
         .scrollBounceBehavior(.basedOnSize)   // static when it fits, scrolls only when clamped
         .frame(width: panelWidth, height: panelHeight)
-        // Don't rely on the host window's rounded mask: once the content is smaller than the
-        // window, its own square corners would show through at the edges.
-        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .tint(.instrument)   // unify on the single accent (segmented controls, switch, sliders)
         // Authoritative popover visibility for stopping the poll/motion (see bindPanelWindow),
         // AND the only way to shrink the hosting NSPanel: MenuBarExtra(.window) grows its

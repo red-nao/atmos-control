@@ -62,7 +62,7 @@ struct EqualizerSection: View {
         } header: {
             Text("Equalizer")
         } footer: {
-            Text("Ten fixed bands (1 octave wide, ±\(Int(EQConfig.gainLimit)) dB) applied to the stereo signal before spatialization. Drag a fader, or double-click it to zero that band.")
+            SectionFootnote("Ten fixed bands (1 octave wide, ±\(Int(EQConfig.gainLimit)) dB) applied to the stereo signal before spatialization. Drag a fader, or double-click it to zero that band.")
         }
     }
 
@@ -156,10 +156,10 @@ struct EqualizerSection: View {
             }
             StepSlider(value: Double(manual ? eq.manualPreamp : controller.eqPreampDB),
                        range: Double(-EQConfig.preampLimit)...Double(EQConfig.gainLimit),
-                       step: 0.5) { controller.setManualPreamp(Float($0)) }
+                       step: 0.1) { controller.setManualPreamp(Float($0)) }
                 .disabled(!manual)
                 .opacity(manual ? 1 : 0.5)
-                .help(manual ? "Drag, or click either side of the knob to nudge by 0.5 dB"
+                .help(manual ? "Drag, or click either side of the knob to nudge by 0.1 dB"
                              : "Switch to Manual to set the pre-amp yourself")
         }
         .disabled(!eq.enabled)
@@ -188,6 +188,23 @@ struct VerticalGainSlider: View {
 
     private let trackWidth: CGFloat = 5
     private let knobHeight: CGFloat = 10
+    private let detent: Float = 0.5          // one click = 0.5 dB, same grid as the drag
+
+    @State private var dragging = false
+
+    /// Gain for a point on the fader, snapped to the detent grid (and to flat near 0).
+    private func gain(atY yPos: CGFloat, usable: CGFloat) -> Float {
+        let f = (yPos - knobHeight / 2) / usable
+        var v = limit - Float(min(max(f, 0), 1)) * 2 * limit
+        v = (v / detent).rounded() * detent
+        if abs(v) < 0.6 { v = 0 }            // snap to flat
+        return v
+    }
+
+    private func bump(_ direction: Float) {
+        let v = ((value / detent).rounded() + direction) * detent
+        onChange(min(max(v, -limit), limit))
+    }
 
     var body: some View {
         VStack(spacing: 4) {
@@ -212,7 +229,7 @@ struct VerticalGainSlider: View {
                         .frame(height: 1)
                         .offset(y: mid - 0.5)
                     // Fill from centre to the knob
-                    Capsule().fill(Color.accentColor.opacity(0.85))
+                    Capsule().fill(Color.instrument.opacity(0.9))
                         .frame(width: trackWidth, height: max(abs(y - mid), 1))
                         .offset(y: min(y, mid))
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -221,7 +238,10 @@ struct VerticalGainSlider: View {
                         .fill(Color(nsColor: .controlColor))
                         .overlay(RoundedRectangle(cornerRadius: knobHeight / 2)
                             .strokeBorder(Color.primary.opacity(0.28), lineWidth: 0.8))
-                        .shadow(radius: 0.5, y: 0.5)
+                        .shadow(color: .black.opacity(dragging ? 0.3 : 0.18),
+                                radius: dragging ? 1.6 : 0.8, y: 0.5)
+                        .scaleEffect(dragging ? 1.06 : 1)
+                        .animation(.easeOut(duration: 0.12), value: dragging)
                         .frame(width: 20, height: knobHeight)
                         .offset(y: y - knobHeight / 2)
                         .frame(maxWidth: .infinity, alignment: .center)
@@ -230,11 +250,18 @@ struct VerticalGainSlider: View {
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { g in
-                            let f = (g.location.y - knobHeight / 2) / usable
-                            var v = limit - Float(min(max(f, 0), 1)) * 2 * limit
-                            v = (v / 0.5).rounded() * 0.5                 // 0.5 dB detents
-                            if abs(v) < 0.6 { v = 0 }                     // snap to flat
-                            onChange(v)
+                            if !dragging && abs(g.translation.height) > 2.5 { dragging = true }
+                            guard dragging else { return }
+                            onChange(gain(atY: g.location.y, usable: usable))
+                        }
+                        .onEnded { g in
+                            if dragging {
+                                onChange(gain(atY: g.location.y, usable: usable))
+                                dragging = false
+                            } else {
+                                // Click above the knob = one detent up, below = one down.
+                                bump(g.location.y < y ? 1 : -1)
+                            }
                         }
                 )
                 .onTapGesture(count: 2) { onReset() }
@@ -244,7 +271,7 @@ struct VerticalGainSlider: View {
                 .font(.system(size: 10)).monospacedDigit()
                 .foregroundStyle(.secondary)
         }
-        .help("\(caption) Hz — double-click to reset")
+        .help("\(caption) Hz — drag, click above/below the knob for 0.5 dB, double-click to reset")
     }
 }
 
@@ -292,8 +319,8 @@ struct EQCurveView: View {
             fill.addLine(to: CGPoint(x: w, y: y(0)))
             fill.addLine(to: CGPoint(x: 0, y: y(0)))
             fill.closeSubpath()
-            ctx.fill(fill, with: .color(.accentColor.opacity(active ? 0.14 : 0.06)))
-            ctx.stroke(curve, with: .color(active ? .accentColor : .secondary),
+            ctx.fill(fill, with: .color(.instrument.opacity(active ? 0.16 : 0.06)))
+            ctx.stroke(curve, with: .color(active ? .instrument : .secondary),
                        style: StrokeStyle(lineWidth: 1.8, lineJoin: .round))
         }
         .background(RoundedRectangle(cornerRadius: 6).fill(Color.primary.opacity(0.04)))
