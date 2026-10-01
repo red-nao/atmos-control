@@ -552,7 +552,7 @@ public final class SpatialEngine: @unchecked Sendable {
             guard let self, self.isRunning, gen == self.formatChangeGeneration else { return }
             guard let now = deviceNominalSampleRate(self.startedCaptureID),
                   abs(now - self.activeSampleRate) > 1 else { return }
-            self.selog("capture rate \(Int(self.activeSampleRate)) → \(Int(now)) Hz, rebuilding")
+            selog("capture rate \(Int(self.activeSampleRate)) → \(Int(now)) Hz, rebuilding")
             self.attemptFormatRebuild(retriesLeft: 2)
         }
     }
