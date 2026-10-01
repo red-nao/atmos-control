@@ -23,9 +23,9 @@ struct PanelView: View {
     /// ScrollView absorbs any residual overflow. The panel NEVER collapses (F11): a mode that
     /// can't run shows an inline notice, not a stripped-down surface.
     private var panelHeight: CGFloat {
-        var h: CGFloat = 384
-        if controller.profileDirty { h += 58 }
-        if controller.bypassed { h += 62 }
+        var h: CGFloat = 330
+        if controller.profileDirty { h += 56 }
+        if controller.bypassed { h += 72 }
         if controller.permissionNeeded { h += 78 }
         if controller.silentCaptureSuspected { h += 78 }
         if controller.tapWarning != nil { h += 44 }
@@ -75,7 +75,8 @@ struct PanelView: View {
             Divider()
             footer
         }
-        .padding(14)
+        .padding(.horizontal, 14)
+        .padding(.vertical, 12)
     }
 
     // MARK: Header

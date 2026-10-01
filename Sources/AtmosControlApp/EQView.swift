@@ -122,41 +122,46 @@ struct EqualizerSection: View {
         } message: {
             Text("\"\(controller.selectedEQPreset?.name ?? "")\" will be removed. This cannot be undone.")
         }
-}
-
-/// "Rock" → "Rock copy" when saving a modified built-in/selected preset.
-private func suggestedName() -> String {
-    guard let s = controller.selectedEQPreset, !s.isBuiltIn else { return "My preset" }
-    return "\(s.name) copy"
-}
-
-// MARK: Pre-amp
-
-@ViewBuilder
-private var preampRow: some View {
-    let manual = eq.preampMode == .manual
-    LabeledContent("Pre-amp") {
-        HStack(spacing: 10) {
-            Picker("", selection: Binding(get: { eq.preampMode },
-                                          set: { controller.setPreampMode($0) })) {
-                ForEach(PreampMode.allCases) { Text($0.label).tag($0) }
-            }
-            .pickerStyle(.segmented).labelsHidden().frame(width: 130)
-
-            Slider(value: Binding(get: { Double(manual ? eq.manualPreamp : controller.eqPreampDB) },
-                                  set: { controller.setManualPreamp(Float($0)) }),
-                   in: Double(-EQConfig.preampLimit)...Double(EQConfig.gainLimit))
-                .disabled(!manual)
-
-            Text(String(format: "%+.1f dB", controller.eqPreampDB))
-                .font(.system(.callout, design: .monospaced)).monospacedDigit()
-                .foregroundStyle(.secondary).frame(width: 66, alignment: .trailing)
-                .contentShape(Rectangle())
-                .onTapGesture(count: 2) { if manual { controller.setManualPreamp(0) } }
-                .help(manual ? "Double-click to reset to 0 dB"
-                             : "Set automatically so the loudest point of the curve stays at 0 dB")
-        }
     }
+
+    /// "Rock" → "Rock copy" when saving a modified built-in/selected preset.
+    private func suggestedName() -> String {
+        guard let s = controller.selectedEQPreset, !s.isBuiltIn else { return "My preset" }
+        return "\(s.name) copy"
+    }
+
+    // MARK: Pre-amp
+
+    @ViewBuilder
+    private var preampRow: some View {
+        let manual = eq.preampMode == .manual
+        // Two lines rather than one LabeledContent row: the slider then gets the full
+        // width of the section instead of fighting the label column and the mode picker.
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(spacing: 10) {
+                Text("Pre-amp")
+                Picker("", selection: Binding(get: { eq.preampMode },
+                                              set: { controller.setPreampMode($0) })) {
+                    ForEach(PreampMode.allCases) { Text($0.label).tag($0) }
+                }
+                .pickerStyle(.segmented).labelsHidden().frame(width: 124)
+                Spacer()
+                Text(String(format: "%+.1f dB", controller.eqPreampDB))
+                    .font(.system(.callout, design: .monospaced)).monospacedDigit()
+                    .foregroundStyle(.secondary)
+                    .contentShape(Rectangle())
+                    .onTapGesture(count: 2) { if manual { controller.setManualPreamp(0) } }
+                    .help(manual ? "Double-click to reset to 0 dB"
+                                 : "Set automatically so the loudest point of the curve stays at 0 dB")
+            }
+            StepSlider(value: Double(manual ? eq.manualPreamp : controller.eqPreampDB),
+                       range: Double(-EQConfig.preampLimit)...Double(EQConfig.gainLimit),
+                       step: 0.5) { controller.setManualPreamp(Float($0)) }
+                .disabled(!manual)
+                .opacity(manual ? 1 : 0.5)
+                .help(manual ? "Drag, or click either side of the knob to nudge by 0.5 dB"
+                             : "Switch to Manual to set the pre-amp yourself")
+        }
         .disabled(!eq.enabled)
         .opacity(eq.enabled ? 1 : 0.45)
     }

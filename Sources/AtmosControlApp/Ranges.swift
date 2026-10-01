@@ -27,6 +27,17 @@ struct ParamSpec {
     let def: Double
     let unit: String
     let fmt: String
+    /// Click-step override; by default one step is one unit of the displayed precision
+    /// ("%.2f" → 0.01, "%+.0f" → 1), which is exactly "the smallest change you can see".
+    var explicitStep: Double? = nil
+
+    var step: Double {
+        if let s = explicitStep { return s }
+        guard let dot = fmt.firstIndex(of: "."),
+              let digits = fmt[fmt.index(after: dot)].wholeNumberValue else { return 1 }
+        return pow(10, -Double(digits))
+    }
+
     func text(_ v: Double) -> String { String(format: fmt + "%@", v, unit) }
     func text(_ v: Float)  -> String { text(Double(v)) }
 }

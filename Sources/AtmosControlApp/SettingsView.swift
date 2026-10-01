@@ -349,10 +349,9 @@ struct SettingsView: View {
     @ViewBuilder
     private func liveSlider(_ label: String, _ spec: ParamSpec, value: Float,
                             live: @escaping (Float) -> Void) -> some View {
-        let binding = Binding<Double>(get: { Double(value) }, set: { live(Float($0)) })
         LabeledContent(label) {
             HStack(spacing: 10) {
-                Slider(value: binding, in: spec.range)
+                StepSlider(value: Double(value), range: spec.range, step: spec.step) { live(Float($0)) }
                 Text(spec.text(value))
                     .font(.system(.callout, design: .monospaced)).monospacedDigit()
                     .foregroundStyle(.secondary).frame(width: 66, alignment: .trailing)
@@ -368,13 +367,12 @@ struct SettingsView: View {
     @ViewBuilder
     private func rebuildSlider(_ label: String, _ spec: ParamSpec, _ kp: WritableKeyPath<SpatialConfig, Float>) -> some View {
         let value = controller.config[keyPath: kp]
-        let binding = Binding<Double>(get: { Double(value) },
-                                      set: { controller.config[keyPath: kp] = Float($0) })
         LabeledContent(label) {
             HStack(spacing: 10) {
-                Slider(value: binding, in: spec.range) { editing in
-                    if !editing { controller.applyConfig() }
-                }
+                // Mutate live so the readout tracks the drag; rebuild once, at the end.
+                StepSlider(value: Double(value), range: spec.range, step: spec.step,
+                           onChange: { controller.config[keyPath: kp] = Float($0) },
+                           onCommit: { controller.applyConfig() })
                 Text(spec.text(value))
                     .font(.system(.callout, design: .monospaced)).monospacedDigit()
                     .foregroundStyle(.secondary).frame(width: 66, alignment: .trailing)
@@ -390,10 +388,11 @@ struct SettingsView: View {
     private var reverbBlendSlider: some View {
         let spec = Param.reverbBlend
         let value = controller.config.reverbBlend
-        let binding = Binding<Double>(get: { Double(value) }, set: { controller.setReverbBlend(Float($0)) })
         LabeledContent("Reverb blend") {
             HStack(spacing: 10) {
-                Slider(value: binding, in: spec.range)
+                StepSlider(value: Double(value), range: spec.range, step: spec.step) {
+                    controller.setReverbBlend(Float($0))
+                }
                 Text(spec.text(value))
                     .font(.system(.callout, design: .monospaced)).monospacedDigit()
                     .foregroundStyle(.secondary).frame(width: 66, alignment: .trailing)

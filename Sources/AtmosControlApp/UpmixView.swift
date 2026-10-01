@@ -93,10 +93,9 @@ struct UpmixSection: View {
     @ViewBuilder
     private func liveSlider(_ label: String, _ spec: ParamSpec, value: Float,
                             live: @escaping (Float) -> Void) -> some View {
-        let binding = Binding<Double>(get: { Double(value) }, set: { live(Float($0)) })
         LabeledContent(label) {
             HStack(spacing: 10) {
-                Slider(value: binding, in: spec.range)
+                StepSlider(value: Double(value), range: spec.range, step: spec.step) { live(Float($0)) }
                 Text(spec.text(value))
                     .font(.system(.callout, design: .monospaced)).monospacedDigit()
                     .foregroundStyle(.secondary).frame(width: 66, alignment: .trailing)

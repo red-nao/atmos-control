@@ -904,6 +904,10 @@ final class EngineController {
         guard let p = spatialPresets.first(where: { $0.id == id }) else { return }
         selectedSpatialPresetID = id
         config = p.applied(to: config)
+        // The preset carries its own upmix settings, but `sourceMode` is what actually
+        // switches the upmixer in and out of the graph — re-derive it, or the UI reads
+        // "Upmix off" while the engine keeps rendering the old topology.
+        syncUpmixMode()
         resolveAlgorithm()
         applyConfig()
     }
