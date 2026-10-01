@@ -23,8 +23,8 @@ public enum LFEMode: String, Codable, CaseIterable, Sendable, Identifiable {
 public struct UpmixConfig: Codable, Equatable, Sendable {
     public var enabled: Bool = false
     public var layout: UpmixLayout = .surround51
-    /// 1024 (21.3 ms @48 kHz) or 2048. Changing it rebuilds the graph.
-    public var fftSize: Int = 1024
+    /// 2048 (42.7 ms @48 kHz) or 1024. Changing it rebuilds the graph.
+    public var fftSize: Int = 2048
     public var centerStrength: Float = 1.0      // 0…1.5
     public var surroundLevel: Float = 0         // dB, -24…+6
     public var heightLevel: Float = -6          // dB, -24…+6 (7.1.4 only)
@@ -58,6 +58,6 @@ public struct UpmixConfig: Codable, Equatable, Sendable {
         ambientBias    = clampFinite(lenient(c, .ambientBias, ambientBias), -12, 12, 0)
         lfeMode        = lenient(c, .lfeMode, lfeMode)
         surroundSpread = clampFinite(lenient(c, .surroundSpread, surroundSpread), 0.5, 1.3, 1)
-        if fftSize != 1024 && fftSize != 2048 { fftSize = 1024 }
+        if fftSize != 1024 && fftSize != 2048 { fftSize = 2048 }
     }
 }
