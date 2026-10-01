@@ -188,7 +188,7 @@ struct VerticalGainSlider: View {
 
     private let trackWidth: CGFloat = 5
     private let knobHeight: CGFloat = 10
-    private let detent: Float = 0.5          // one click = 0.5 dB, same grid as the drag
+    private let detent: Float = 0.1          // one click = 0.1 dB, same grid as the drag
 
     @State private var dragging = false
 
@@ -197,7 +197,9 @@ struct VerticalGainSlider: View {
         let f = (yPos - knobHeight / 2) / usable
         var v = limit - Float(min(max(f, 0), 1)) * 2 * limit
         v = (v / detent).rounded() * detent
-        if abs(v) < 0.6 { v = 0 }            // snap to flat
+        // A narrow dead zone around flat, so a coarse drag can still land exactly on 0
+        // without fighting the 0.1 dB grid. Clicks bypass this and step cleanly.
+        if abs(v) < 0.15 { v = 0 }
         return v
     }
 
@@ -271,7 +273,7 @@ struct VerticalGainSlider: View {
                 .font(.system(size: 10)).monospacedDigit()
                 .foregroundStyle(.secondary)
         }
-        .help("\(caption) Hz — drag, click above/below the knob for 0.5 dB, double-click to reset")
+        .help("\(caption) Hz — drag, click above/below the knob for 0.1 dB, double-click to reset")
     }
 }
 
