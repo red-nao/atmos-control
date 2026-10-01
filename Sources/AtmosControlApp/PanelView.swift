@@ -22,6 +22,8 @@ struct PanelView: View {
     /// (a MenuBarExtra(.window) landmine). Each optional inline row adds a fixed amount; the
     /// ScrollView absorbs any residual overflow. The panel NEVER collapses (F11): a mode that
     /// can't run shows an inline notice, not a stripped-down surface.
+    private let panelWidth: CGFloat = 332
+
     private var panelHeight: CGFloat {
         var h: CGFloat = 330
         if controller.profileDirty { h += 56 }
@@ -41,11 +43,19 @@ struct PanelView: View {
         }
         .scrollIndicators(.never)
         .scrollBounceBehavior(.basedOnSize)   // static when it fits, scrolls only when clamped
-        .frame(width: 332, height: panelHeight)
+        .frame(width: panelWidth, height: panelHeight)
+        // Don't rely on the host window's rounded mask: once the content is smaller than the
+        // window, its own square corners would show through at the edges.
+        .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
         .tint(.instrument)   // unify on the single accent (segmented controls, switch, sliders)
-        // Authoritative popover visibility for stopping the poll/motion (see bindPanelWindow);
+        // Authoritative popover visibility for stopping the poll/motion (see bindPanelWindow),
+        // AND the only way to shrink the hosting NSPanel: MenuBarExtra(.window) grows its
+        // window to fit the content but never shrinks it again, so a shorter state would
+        // otherwise leave transparent dead space above/below the panel.
         // onAppear/onDisappear remain a fallback in case the window signal is unavailable.
-        .background(WindowAccessor { controller.bindPanelWindow($0) })
+        .background(WindowAccessor(fit: CGSize(width: panelWidth, height: panelHeight)) {
+            controller.bindPanelWindow($0)
+        })
         .onAppear { controller.panelAppeared() }
         .onDisappear { controller.panelDisappeared() }
     }
@@ -358,22 +368,52 @@ extension StatusChip where Trailing == EmptyView {
 /// fires on dismissal even when SwiftUI never delivers .onDisappear. All callbacks happen on
 /// the main thread (AppKit), so no cross-actor sending is involved.
 struct WindowAccessor: NSViewRepresentable {
+    /// Content size the hosting window should be forced to (nil = don't touch it).
+    var fit: CGSize? = nil
     let onWindow: (NSWindow?) -> Void
 
     func makeNSView(context: Context) -> WindowReportingView {
         let v = WindowReportingView()
         v.onWindow = onWindow
+        v.fitSize = fit
         return v
     }
     func updateNSView(_ nsView: WindowReportingView, context: Context) {
         nsView.onWindow = onWindow
+        nsView.fitSize = fit
     }
 }
 
 final class WindowReportingView: NSView {
     var onWindow: ((NSWindow?) -> Void)?
+
+    /// Target content size for the hosting window. Setting it resizes the window on the
+    /// next runloop pass (never synchronously from a SwiftUI update, which would re-enter
+    /// layout); the initial fit happens as soon as we have a window.
+    var fitSize: CGSize? {
+        didSet {
+            guard fitSize != oldValue else { return }
+            DispatchQueue.main.async { [weak self] in self?.fitWindow() }
+        }
+    }
+
     override func viewDidMoveToWindow() {
         super.viewDidMoveToWindow()
         onWindow?(window)
+        fitWindow()
+    }
+
+    /// Resize the hosting window to `fitSize`, keeping the TOP edge where it is.
+    /// `setContentSize` pins the bottom-left origin, so shrinking with it would drop the
+    /// top edge away from the menu bar — exactly the gap we're trying to remove.
+    private func fitWindow() {
+        guard let window, let size = fitSize else { return }
+        let target = window.frameRect(forContentRect: NSRect(origin: .zero, size: size)).size
+        let current = window.frame.size
+        guard abs(current.height - target.height) > 0.5 || abs(current.width - target.width) > 0.5 else { return }
+        var f = window.frame
+        f.origin.y = f.maxY - target.height
+        f.size = target
+        window.setFrame(f, display: true)
     }
 }
