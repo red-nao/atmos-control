@@ -81,33 +81,14 @@ and the upmixer's direct/ambient analysis then sees the signal you actually want
 
 ## The menu-bar panel
 
-```
- ((•)) atmos-control                    [ ● ]     ← power
- ─────────────────────────────────────────────
-  Engine  On            Output  AirPods Pro
-  Personalized  On      Head track  Tracking
- ─────────────────────────────────────────────
-  Equalizer                            [ ● ]
-     Preset   [ Rock •              ▾ ]
- ─────────────────────────────────────────────
-  Spatial audio                        [ ● ]
-     Preset   [ Small Room           ▾ ]
-     Upmix to surround                [ ● ]
- ─────────────────────────────────────────────
-  AirPods Pro — unsaved changes                  ← only when the live state
-  [ Save for this device ]  [ Revert ]             differs from the profile
- ─────────────────────────────────────────────
-  Open Full Controls…                   Quit
-```
-
-A `•` after a preset name means the live state no longer matches the stored preset. Editing EQ
-curves, saving presets and everything else lives in **Full Control** (the settings window).
-
 <p align="center">
-  <img src="docs/assets/settings.png" alt="atmos-control settings window" width="720">
+  <img src="docs/assets/panel_new.png" alt="atmos-control menu-bar panel with the spatial visualizer and stereo meters" width="360">
 </p>
 
-*(The screenshots in `docs/assets/` were taken before this fork's UI changes.)*
+
+<p align="center">
+  <img src="docs/assets/settings_new.png" alt="atmos-control settings window" width="720">
+</p>
 
 ---
 
@@ -243,8 +224,7 @@ captured/played frame counters) for diagnostics.
 
 # Reference values
 
-Two working presets, as they appear in the UI. Both are tuned for AirPods with **HRTF HQ** (not
-Automatic) — that is what makes the internal reverb and the distance model audible. Use them as a
+Two working presets, as they appear in the UI. Use them as a
 starting point, then move `Distance`, `Gain` and `Reverb blend` together.
 
 ### Common to both
@@ -433,10 +413,6 @@ This project is a fork of **[atmos-control](https://github.com/yukij3/atmos-cont
 the muting process-tap capture path, the realtime graph and SPSC ring, the HAL driver with its
 7.1.4 channel layout, and the UI language this fork follows — are all upstream work. Everything
 here is built on top of it. Thank you.
-
-The upmixer's design was informed by an analysis of Apple's own "Spatialize Stereo"
-(`ScottySTFTUpmixer`: 1024-frame STFT, 5.1 `MPEG_5_1_A` output, 150 Hz LFE low-pass), which this
-fork follows in shape while adding a 7.1.4 option and exposing the separation parameters.
 
 ## License
 
