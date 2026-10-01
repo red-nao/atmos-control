@@ -210,10 +210,10 @@ public final class SpatialEngine: @unchecked Sendable {
     private var activeSampleRate: Double = 48_000     // capture rate of the running graph
     private var outputDeviceID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
     private var startedCaptureID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)  // capture device resolved at start()
-    private var rateListenerDevice: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
-    private var rateListenerBlock: AudioObjectPropertyListenerBlock? = nil
+    private var rateListeners: [(device: AudioDeviceID, block: AudioObjectPropertyListenerBlock)] = []
     private var cachedOutputName = ""        // device name only changes on start / sink-swap
     private var pollTick = 0                  // downsample the 3116 HAL read
+    private var formatChangeGeneration: UInt64 = 0   // coalesces bursts of rate-change callbacks
     private var cached3116 = false
 
     public init() {}
@@ -456,6 +456,10 @@ public final class SpatialEngine: @unchecked Sendable {
             teardown(); throw SpatialEngineError.setupFailed("unit start")
         }
         installSampleRateListener(captureID)
+        // The sink renegotiates independently of the capture aggregate (AirPods dropping to
+        // 24 kHz for the mic is the common case); watch both or a one-sided change strands
+        // the playback unit at a rate the device no longer runs at.
+        if outID != captureID { installSampleRateListener(outID) }
         isRunning = true
     }
 
@@ -512,6 +516,8 @@ public final class SpatialEngine: @unchecked Sendable {
     // MARK: Capture-rate change listener
 
     private func installSampleRateListener(_ device: AudioDeviceID) {
+        guard device != AudioDeviceID(kAudioObjectUnknown),
+              !rateListeners.contains(where: { $0.device == device }) else { return }
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyNominalSampleRate,
             mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
@@ -519,26 +525,54 @@ public final class SpatialEngine: @unchecked Sendable {
             DispatchQueue.main.async { self?.handleFormatChange() }
         }
         if AudioObjectAddPropertyListenerBlock(device, &addr, DispatchQueue.main, block) == noErr {
-            rateListenerDevice = device
-            rateListenerBlock = block
+            rateListeners.append((device, block))
         }
     }
 
     private func removeSampleRateListener() {
-        guard let block = rateListenerBlock, rateListenerDevice != AudioDeviceID(kAudioObjectUnknown) else { return }
         var addr = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyNominalSampleRate,
             mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
-        AudioObjectRemovePropertyListenerBlock(rateListenerDevice, &addr, DispatchQueue.main, block)
-        rateListenerBlock = nil
-        rateListenerDevice = AudioDeviceID(kAudioObjectUnknown)
+        for l in rateListeners {
+            AudioObjectRemovePropertyListenerBlock(l.device, &addr, DispatchQueue.main, l.block)
+        }
+        rateListeners.removeAll()
     }
 
     /// The capture device renegotiated its nominal rate (e.g. AirPods on mic use):
     /// rebuild the graph at the new rate, then notify observers.
     private func handleFormatChange() {
         guard isRunning else { return }
-        attemptFormatRebuild(retriesLeft: 1)
+        // A single AirPods rate flip fires the listener several times (and on two devices);
+        // rebuilding per callback would tear the graph down mid-build. Coalesce, then check
+        // whether the rate actually moved — most callbacks are no-ops.
+        formatChangeGeneration &+= 1
+        let gen = formatChangeGeneration
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+            guard let self, self.isRunning, gen == self.formatChangeGeneration else { return }
+            guard let now = deviceNominalSampleRate(self.startedCaptureID),
+                  abs(now - self.activeSampleRate) > 1 else { return }
+            self.selog("capture rate \(Int(self.activeSampleRate)) → \(Int(now)) Hz, rebuilding")
+            self.attemptFormatRebuild(retriesLeft: 2)
+        }
+    }
+
+    /// Stop and rebuild the graph on the same devices (watchdog recovery, wake from sleep).
+    /// Throws if the rebuild fails — the caller must then power down, because in tap mode a
+    /// stopped engine with a live tap means the whole system stays muted.
+    public func restartInPlace() throws {
+        let out = outputDeviceID
+        let cap = startedCaptureID
+        stop()
+        try start(outputDeviceID: out, captureDeviceID: cap)
+    }
+
+    /// IO liveness counters (frames in / frames out). Cheap and side-effect free — unlike
+    /// `pollState()`, which resets the peak meters — so the watchdog can read it on its own
+    /// schedule without stealing meter data from the UI tick.
+    public func ioCounters() -> (captured: UInt64, played: UInt64) {
+        guard let ctx else { return (0, 0) }
+        return (ctx.totalCaptured, ctx.totalPlayed)
     }
 
     /// Rebuild the graph at the current device rate. On failure retry once after a short

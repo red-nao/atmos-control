@@ -111,6 +111,15 @@ final class EngineController {
     @ObservationIgnored private var timer: Timer?
     @ObservationIgnored private var silenceProbe: Timer?
     @ObservationIgnored private var silenceTicks = 0
+    @ObservationIgnored private var watchdog: Timer?
+    @ObservationIgnored private var lastIO: (captured: UInt64, played: UInt64) = (0, 0)
+    @ObservationIgnored private var stallTicks = 0
+    @ObservationIgnored private var captureStallTicks = 0
+    @ObservationIgnored private var watchdogRecoveries = 0
+    @ObservationIgnored private var healthyTicks = 0
+    @ObservationIgnored private var asleep = false
+    @ObservationIgnored private var pollInterval: TimeInterval = 0
+    @ObservationIgnored private var sleepObservers: [NSObjectProtocol] = []
     @ObservationIgnored private var savedDefault: AudioDeviceID?
     @ObservationIgnored private var activeSinkID: AudioDeviceID?   // real device the graph renders to
     @ObservationIgnored private var activeCaptureID: AudioDeviceID?  // tap aggregate (tap mode) or nil
@@ -187,6 +196,7 @@ final class EngineController {
         }
         deviceMonitor.onChange = { [weak self] in self?.handleDeviceChange() }
         deviceMonitor.start()
+        observeSleepWake()
 
         // The capture device renegotiated its sample rate and the engine rebuilt the graph.
         // ok == false means the rebuild failed and the engine is stopped: we MUST power off
@@ -535,7 +545,14 @@ final class EngineController {
     }
 
     private func updateActivity() {
-        if isOn && anySurfaceVisible { startPolling() } else { stopPolling() }
+        // The panel no longer draws meters or the soundstage radar (F8), so it only needs
+        // a slow tick for the status chips; the full 15 Hz is for the settings window's
+        // meters and radar. Idle menu-bar use therefore costs ~2 wake-ups a second.
+        if isOn && anySurfaceVisible && !asleep {
+            startPolling(interval: settingsOnScreen ? 1.0 / 15.0 : 1.0 / 2.0)
+        } else {
+            stopPolling()
+        }
         syncMotion()
     }
 
@@ -557,6 +574,8 @@ final class EngineController {
 
     func toggle() {
         if isOn { powerOff(); return }
+        watchdogRecoveries = 0      // a deliberate power-on is a fresh start
+
         // Powering on while a bypass profile is active is an explicit override for this
         // session (the stored profile is untouched — §5.4).
         if bypassed { bypassOverride = true; bypassed = false; poweredOffByBypass = false }
@@ -625,6 +644,7 @@ final class EngineController {
             activeSinkID = real?.id
             savedDefault = nil
             isOn = true
+            startWatchdog()
             lastError = nil
             permissionNeeded = false
             tapDiagnostics = tap.diagnostics
@@ -677,6 +697,7 @@ final class EngineController {
             activeCaptureID = nil
             activeSinkID = real?.id ?? (current.id != atmos ? current.id : nil)
             isOn = true
+            startWatchdog()
             lastError = nil
             updateActivity()
         } catch {
@@ -687,6 +708,7 @@ final class EngineController {
 
     func powerOff() {
         stopSilenceProbe()
+        stopWatchdog()
         tapWarning = nil
         engine.stop()
         if tap.isActive { tap.stop() }
@@ -1163,17 +1185,144 @@ final class EngineController {
 
     // MARK: Polling
 
-    private func startPolling() {
-        guard timer == nil else { return }   // idempotent: don't restart on every activity change
-        let t = Timer(timeInterval: 1.0 / 15.0, repeats: true) { [weak self] _ in
+    private func startPolling(interval: TimeInterval) {
+        // Idempotent: only rebuild the timer when the rate actually has to change.
+        guard timer == nil || pollInterval != interval else { return }
+        stopPolling()
+        let t = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.tick() }
         }
-        t.tolerance = 1.0 / 30.0   // let the OS coalesce wake-ups
+        t.tolerance = interval / 2   // let the OS coalesce wake-ups
         RunLoop.main.add(t, forMode: .common)
         timer = t
+        pollInterval = interval
     }
 
-    private func stopPolling() { timer?.invalidate(); timer = nil }
+    private func stopPolling() { timer?.invalidate(); timer = nil; pollInterval = 0 }
+
+    // MARK: IO watchdog (spec §8 P6)
+
+    /// Fires every 2 s while the engine is on, independently of any window being visible.
+    /// It answers one question: are frames still moving? A graph that is "running" but has
+    /// stopped calling its IO procs is the failure mode behind every "it just went silent"
+    /// report — the device reset under us, the aggregate lost a sub-device, or the tap died.
+    /// The engine can't notice (no callback = no error); only an outside clock can.
+    private func startWatchdog() {
+        stopWatchdog()
+        lastIO = engine.ioCounters()
+        stallTicks = 0; captureStallTicks = 0; healthyTicks = 0
+        let t = Timer(timeInterval: 2.0, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.watchdogTick() }
+        }
+        t.tolerance = 0.5
+        RunLoop.main.add(t, forMode: .common)
+        watchdog = t
+    }
+
+    private func stopWatchdog() {
+        watchdog?.invalidate(); watchdog = nil
+        stallTicks = 0; captureStallTicks = 0; healthyTicks = 0
+        // NB: watchdogRecoveries deliberately survives stop/start — a recovery that goes
+        // through powerOff/powerOn must still count against the budget, or a device that
+        // fails on every start would have us restarting it forever.
+    }
+
+    private func watchdogTick() {
+        guard isOn, !asleep else { return }
+        let io = engine.ioCounters()
+        defer { lastIO = io }
+
+        // Output stalled: nothing is being rendered to the device at all. ~6 s of silence
+        // before acting, because a rebuild is audible and a false positive is worse than
+        // two extra seconds of waiting.
+        if io.played == lastIO.played {
+            stallTicks += 1
+            if stallTicks >= 3 { recoverFromStall("output"); return }
+        } else {
+            stallTicks = 0
+        }
+
+        // Capture stalled while output keeps running: the tap/loopback source died, so the
+        // graph is faithfully rendering an empty ring. Give this one longer (10 s) — a
+        // sub-device can take its time coming back on its own after a device change.
+        if io.captured == lastIO.captured && io.played != lastIO.played {
+            captureStallTicks += 1
+            if captureStallTicks >= 5 { recoverFromStall("capture"); return }
+        } else {
+            captureStallTicks = 0
+        }
+
+        // 30 s of clean flow means whatever went wrong is behind us: let the recovery
+        // budget refill, so a glitch now and a glitch next week don't add up to a power-off.
+        if io.played != lastIO.played && io.captured != lastIO.captured {
+            healthyTicks += 1
+            if healthyTicks >= 15 { healthyTicks = 0; watchdogRecoveries = 0 }
+        } else {
+            healthyTicks = 0
+        }
+    }
+
+    private func recoverFromStall(_ side: String) {
+        stallTicks = 0; captureStallTicks = 0
+        // Don't sit in a restart loop: after three attempts the problem isn't transient.
+        guard watchdogRecoveries < 3 else {
+            lastError = "Audio stopped flowing and restarting didn't help — engine powered off."
+            powerOff()
+            return
+        }
+        watchdogRecoveries += 1
+        do {
+            try engine.restartInPlace()
+            lastIO = engine.ioCounters()
+            healthyTicks = 0
+            lastError = "Audio stalled (\(side)) — the engine restarted itself."
+            updateActivity()
+        } catch {
+            // In tap mode a stopped engine plus a live tap = the whole system stays muted,
+            // so this can never be left half-up. Rebuild the whole path (new tap, re-resolved
+            // sink); powerOn reports its own error if that fails too.
+            powerOff()
+            lastError = "Audio stalled — rebuilding the audio path."
+            powerOn()
+        }
+    }
+
+    // MARK: Sleep / wake
+
+    /// Sleep stops all IO, which would look exactly like a stall; and on wake the devices
+    /// are often not back yet. Park the watchdog across the transition and rebuild once,
+    /// after a settling delay, instead of fighting the HAL while it reinitialises.
+    private func observeSleepWake() {
+        let nc = NSWorkspace.shared.notificationCenter
+        sleepObservers.append(nc.addObserver(forName: NSWorkspace.willSleepNotification,
+                                             object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.asleep = true
+                self.stopPolling()
+            }
+        })
+        sleepObservers.append(nc.addObserver(forName: NSWorkspace.didWakeNotification,
+                                             object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self else { return }
+                self.asleep = false
+                self.updateActivity()
+                guard self.isOn else { return }
+                DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+                    MainActor.assumeIsolated {
+                        guard let self, self.isOn, !self.asleep else { return }
+                        // Re-evaluate the sink first (the default output often changes over
+                        // sleep), then let the watchdog resume from a clean baseline.
+                        self.handleDeviceChange()
+                        self.lastIO = self.engine.ioCounters()
+                        self.stallTicks = 0; self.captureStallTicks = 0
+                        self.watchdogRecoveries = 0
+                    }
+                }
+            }
+        })
+    }
 
     // MARK: Silent-capture probe
 
