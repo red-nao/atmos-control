@@ -126,21 +126,40 @@ smallest change the readout can show (0.1 dB on the EQ, 0.01 on `Center strength
 
 ## Upmix
 
-Turning this on or off rebuilds the audio graph, so expect a brief gap in the audio.
+Turning **Upmix stereo to surround** on or off (and changing **Target layout** or **FFT size**)
+rebuilds the audio graph, so expect a brief gap. Everything else here is live.
+
+Two kernels share one analysis engine, and the picker in **Advanced** switches between them
+*without* a rebuild — so Classic ↔ Natural is an instant A/B. The measurements behind them, the
+defects each one fixes and the reasoning borrowed from Auro-Matic / Apple / Sonos are written up
+in [`docs/UPMIX-QUALITY.md`](docs/UPMIX-QUALITY.md); `tools/upmix-lab/` reproduces the numbers
+offline.
 
 | Setting | What it does | Change it when |
 |---|---|---|
 | **Upmix stereo to surround** | Runs the STFT upmixer and switches the spatial mixer to 6 or 12 virtual speakers. | You want music/video to open up beyond the two front points. Off = the classic two-point stereo soundstage. |
 | **Target layout** | `5.1` (L C R LFE Ls Rs) or `7.1.4` (adds rear surrounds and four height speakers). | 7.1.4 for films and anything with vertical ambience; 5.1 is what Apple's own "Spatialize Stereo" does and is lighter on CPU. |
-| **Center strength** | 0 … 1.5 — how much of the correlated centre (vocals, dialogue) is pulled out of L/R into the centre speaker. | Raise it if vocals feel vague between the ears; lower it if the mix sounds mono-ish and narrow. |
+| **Strength** | 0 … 1 — the master effect amount, Auro-Matic style. 0 passes the stereo signal through untouched; 1 is the full effect. | Your "how much upmix" knob. Use it to A/B against bypass, or dial the whole thing back on dense material. |
+| **Center strength** | 0 … 1.5 — how much of the correlated centre (vocals, dialogue) is pulled out of L/R into the centre speaker. The pull is energy-exact, so moving it never changes the level. | Raise it if vocals feel vague between the ears; lower it if the mix sounds mono-ish and narrow. |
 | **Surround level** | −24 … +6 dB on the surround speakers. | Raise for a bigger, more enveloping ambience; lower if the back of the room draws attention to itself. |
 | **Height level** | −24 … +6 dB on the four height speakers (7.1.4 only). | Raise for more "ceiling" air; the default −6 dB keeps heights as a hint rather than an effect. |
+| **Ambience spread** | 0 … 1 — how much of the extracted ambience leaves the front pair for the surrounds and heights (power-preserving crossfade). 0 keeps it all in front. | Raise for more envelopment on headphones; lower when the rear starts to pull attention away from the music. |
 | **Decorrelation** | 0 … 1 — phase decorrelation applied to the ambient component (group delay bounded to ±2.5 ms, so transients stay intact). | Higher = wider, more diffuse ambience. Lower it if cymbals or applause start to smear. |
-| **Ambient bias** | −12 … +12 dB — tilts the direct/ambient split. Negative favours direct sound. | Negative for focus and intelligibility; positive for a more reverberant, "in the room" feel. |
+| **Ambient bias** | −12 … +12 dB — level trim on the ambience that is sent to the surrounds and heights. | Positive for a more reverberant, "in the room" feel; negative for focus and intelligibility. |
 | **Surround spread** | 0.5 … 1.3× — scales the surround speaker angles. | Narrower (<1) for a tighter stage, wider (>1) for a larger room. |
 | **LFE** | `Off` or `150 Hz low-pass`. Off by default: the low end is already in L/R, and the spatial mixer bypasses the LFE bus anyway. | Effectively diagnostic — leave Off. |
+| **Kernel** | `Classic` (the original first-generation extractor) or `Natural` (default). Natural fixes the centre-law level dip, stops hard-panned sound being treated as ambience, bass-manages the sends and synthesises the height layer from reflections. | Leave it on Natural; switch to Classic to hear exactly what the quality pass changed. |
+| **Transient preservation** | 0 … 1 — how fast the direct/ambience mask may open, plus an onset gate that briefly mutes the sends. | Keep at 1 for percussive material; lower it if you *want* attacks to bloom into the room. |
+| **Reflections** | −24 … +6 dB — trim on the early-reflection layer that feeds the heights and rear surrounds (delayed, high-passed, HF-trimmed copies of the ground channels, weighted by physical adjacency, Auro-Matic style). | Raise for a more solid, "real room" height image; −24 dB to turn the synthesis off entirely. |
+| **Bass management on the sends** | 150 Hz high-pass on everything sent to the surrounds and heights, so the low end stays in the front. | Leave it on. Off is diagnostic: it is what the old kernel did, and it is why the bass detached from the front. |
+| **Auto level** | Slow (2 s) bed-domain trim so switching the upmixer on and off does not change the loudness. | Leave it on; turn it off to hear the raw upmix law in the lab measurements. |
 | **FFT size** | 1024 (21 ms @48 kHz) or 2048 (43 ms). Larger = finer frequency resolution, better separation, more latency. | 2048 for music where separation matters; 1024 if you notice lip-sync drift on video. |
 | **Added latency** | Read-only: the algorithmic delay the upmixer adds. | Audio lagging video is tolerated up to roughly 125 ms, so both sizes are safe — but this is the number to check. |
+
+Measured on the bench (`tools/upmix-lab/out/`), 7.1.4, auto-level off: the level response across the
+image is flat to 0.00 dB (Classic dips 2.88 dB mid-pan), a hard-panned tone leaks −10.3 dB instead of
+landing 100 % in the surrounds, sub-120 Hz energy in the sends drops from +0.9 dB to −17.5 dB, and the
+front-stage timbre deviation on the synthetic song falls from 8.88 dB to 1.45 dB.
 
 ## Soundstage
 

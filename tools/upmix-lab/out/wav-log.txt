@@ -1,0 +1,3 @@
+wrote /home/user/atmos-control/tools/upmix-lab/out/song_v1_714_binaural.wav
+wrote /home/user/atmos-control/tools/upmix-lab/out/song_v2_714_binaural.wav
+wrote /home/user/atmos-control/tools/upmix-lab/out/song_stereo_binaural_ref.wav

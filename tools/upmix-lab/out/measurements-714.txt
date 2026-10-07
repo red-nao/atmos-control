@@ -1,0 +1,39 @@
+== atmos-control upmix lab · layout 714 · 48000 Hz ==
+   (auto-level disabled in the measurement kernels)
+
+-- level response across the image (steady tone, 17 positions) --
+   v1 (current)     -2.88 .. -0.00 dB  (spread 2.88 dB)
+   v2 (proposed)    -0.00 .. -0.00 dB  (spread 0.00 dB)
+
+-- centre source --
+   v1 (current)     level -0.00 dB   centre share   -0.0 dB
+   v2 (proposed)    level -0.00 dB   centre share   -0.2 dB
+
+-- 60 Hz centre bass (surround share; bass must stay in the front) --
+   v1 (current)     <120 Hz energy in the surrounds/height, vs input    +0.9 dB
+   v2 (proposed)    <120 Hz energy in the surrounds/height, vs input   -17.5 dB
+
+-- hard-panned coherent tone (must stay in the front) --
+   v1 (current)     surround   +0.0 dB   front -120.0 dB   L -120.0 dB
+   v2 (proposed)    surround  -10.3 dB   front   -0.4 dB   L   -0.4 dB
+
+-- fully decorrelated input (ambience must go wide, not away) --
+   v1 (current)     surround share   -0.2 dB   front/rear corr 0.043   Ls/Rs corr 0.002   IACC 0.021
+   v2 (proposed)    surround share   -2.3 dB   front/rear corr 0.019   Ls/Rs corr 0.002   IACC 0.103
+
+-- click train + diffuse bed (attack/tail energy in the surrounds) --
+   v1 (current)     surround attack/tail   -1.4 dB
+   v2 (proposed)    surround attack/tail   -4.7 dB
+
+-- synthetic song: front-stage timbre + binaural width --
+   v1 (current)     front L+R deviation  8.88 dB   IACC 0.853 (stereo ref 0.923)   eardrum deviation  4.87 dB
+   v2 (proposed)    front L+R deviation  1.45 dB   IACC 0.885 (stereo ref 0.923)   eardrum deviation  2.33 dB
+
+-- loudness with the upmixer engaged (synthetic song, vs plain stereo) --
+   v1 (current)           bed -0.11 dB   binaural -0.42 dB   front pair -6.93 dB
+   v2 (auto level off)    bed +0.35 dB   binaural -0.11 dB   front pair -3.61 dB
+   v2 (auto level on)     bed +0.15 dB   binaural -0.33 dB   front pair -3.80 dB
+
+-- passthrough null (strength = 0) --
+   v2 (proposed)    max |out - in| = 2.220e-16
+

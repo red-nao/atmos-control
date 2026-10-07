@@ -1,7 +1,9 @@
 // AtmosControlApp/UpmixView.swift — the Upmix section of Full Control.
 //
 // Everything here except ON/OFF, Target layout and FFT size is live; those three change
-// the shape of the graph, so they rebuild it (a ~200 ms gap, §4.7).
+// the shape of the graph, so they rebuild it (a ~200 ms gap, §4.7). The kernel picker is
+// live as well: both kernels share one analysis engine, so Classic ↔ Natural is an
+// instant A/B — the fastest way to hear what the quality pass actually did.
 
 import SwiftUI
 import SpatialEngine
@@ -32,6 +34,12 @@ struct UpmixSection: View {
                 }
                 .pickerStyle(.segmented)
 
+                // The master control, Auro-Matic style: 0 = the stereo signal passes
+                // through untouched, 1 = the full effect.
+                liveSlider("Strength", Param.upStrength, value: up.strength) {
+                    controller.setUpmix(strength: $0)
+                }
+
                 liveSlider("Center strength", Param.upCenter, value: up.centerStrength) {
                     controller.setUpmix(center: $0)
                 }
@@ -42,6 +50,9 @@ struct UpmixSection: View {
                     liveSlider("Height level", Param.upHeight, value: up.heightLevel) {
                         controller.setUpmix(heightLevel: $0)
                     }
+                }
+                liveSlider("Ambience spread", Param.upAmbienceSpread, value: up.spread) {
+                    controller.setUpmix(spread: $0)
                 }
                 liveSlider("Decorrelation", Param.upDecorr, value: up.decorrelation) {
                     controller.setUpmix(decorrelation: $0)
@@ -60,6 +71,28 @@ struct UpmixSection: View {
                 .pickerStyle(.segmented)
 
                 DisclosureGroup("Advanced") {
+                    VStack(alignment: .leading, spacing: 6) {
+                        Picker("Kernel", selection: Binding(get: { up.quality },
+                                                            set: { controller.setUpmix(quality: $0) })) {
+                            ForEach(UpmixQuality.allCases) { Text($0.label).tag($0) }
+                        }
+                        .pickerStyle(.segmented)
+                        Text(up.quality.blurb)
+                            .font(.footnote).foregroundStyle(.secondary)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+
+                    liveSlider("Transient preservation", Param.upTransient, value: up.transients) {
+                        controller.setUpmix(transients: $0)
+                    }
+                    liveSlider("Reflections", Param.upReflections, value: up.reflectionsLevel) {
+                        controller.setUpmix(reflectionsLevel: $0)
+                    }
+                    Toggle("Bass management on the sends", isOn: Binding(get: { up.bassManagement },
+                                                                        set: { controller.setUpmix(bassManagement: $0) }))
+                    Toggle("Auto level", isOn: Binding(get: { up.autoLevel },
+                                                       set: { controller.setUpmix(autoLevel: $0) }))
+
                     Picker("FFT size", selection: Binding(get: { up.fftSize },
                                                           set: { controller.setUpmixFFTSize($0) })) {
                         Text("1024").tag(1024)
@@ -85,7 +118,7 @@ struct UpmixSection: View {
         } header: {
             Text("Upmix")
         } footer: {
-            SectionFootnote("Splits the stereo signal into direct sound and ambience with a short-time Fourier transform, then places them on \(up.layout == .surround714 ? "twelve" : "six") virtual speakers before binaural rendering. Turning it on or off rebuilds the audio graph, so expect a brief gap.")
+            SectionFootnote("Splits the stereo signal into direct sound and ambience with a short-time Fourier transform, then places them on \(up.layout == .surround714 ? "twelve" : "six") virtual speakers before binaural rendering. Natural keeps the direct path untouched, bass-manages the sends and synthesises the height layer from delayed reflections; Classic is the original kernel. Turning it on or off rebuilds the audio graph, so expect a brief gap.")
         }
     }
 

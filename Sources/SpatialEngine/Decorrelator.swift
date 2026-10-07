@@ -19,9 +19,13 @@ enum Decorrelator {
     static let segment = 8
 
     /// Fill `phi[ch][0...bins-1]` with the phase curves. Channel 0/1/2/3 (L/R/C/LFE) get
-    /// zero phase — only the ambience channels are decorrelated.
+    /// zero phase — only the ambience channels are decorrelated. `tauMax` and `segment`
+    /// can be overridden for the gentler curves used on the front-ambience copies (which
+    /// are summed with the direct path and therefore must not smear transients).
     static func fill(phi: UnsafeMutablePointer<UnsafeMutablePointer<Float>>,
-                     channels: Int, bins: Int, sampleRate: Double, fftSize: Int) {
+                     channels: Int, bins: Int, sampleRate: Double, fftSize: Int,
+                     tauMax: Float = Decorrelator.tauMaxSeconds,
+                     segment: Int = Decorrelator.segment) {
         var rng = SplitMix64(seed: 0x5EED_A7_C0FFEE)
         let df = Float(sampleRate / Double(fftSize))       // Hz per bin
         let twoPiDf = 2 * Float.pi * df
@@ -34,13 +38,13 @@ enum Decorrelator {
                 continue
             }
             // Draw the control points for τ(f).
-            let points = bins / segment + 2
+            let points = bins / max(segment, 1) + 2
             var taus = [Float](repeating: 0, count: points)
-            for i in 0..<points { taus[i] = (rng.nextUnit() * 2 - 1) * tauMaxSeconds }
+            for i in 0..<points { taus[i] = (rng.nextUnit() * 2 - 1) * tauMax }
 
             var acc: Float = 0
             for k in 0..<bins {
-                let pos = Float(k) / Float(segment)
+                let pos = Float(k) / Float(max(segment, 1))
                 let i = Int(pos)
                 let frac = pos - Float(i)
                 let tau = taus[i] + (taus[min(i + 1, points - 1)] - taus[i]) * frac

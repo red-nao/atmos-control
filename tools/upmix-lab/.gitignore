@@ -1,0 +1,3 @@
+# The listening WAVs are regenerable and large; keep them out of git.
+out/*.wav
+__pycache__/
