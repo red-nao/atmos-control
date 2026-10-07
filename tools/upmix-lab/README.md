@@ -17,7 +17,7 @@ What it contains:
 |---|---|
 | `KernelV1` | a faithful port of the kernel that shipped before the quality pass (Classic) |
 | `KernelV2` | the design the Natural kernel follows, with every change switchable |
-| measurement suite | pan sweep, centre, bass, hard-pan, diffuse, transient, mask jitter, null, loudness |
+| measurement suite | pan sweep, centre, bass, hard-pan, diffuse, transient (with a click-level sweep + false-trigger duty), mask jitter, null, loudness |
 | binaural monitor | cheap HRTF (Woodworth ITD + head shadow + pinna notch) so width/front-back is audible |
 | WAV I/O | 48 kHz IEEE-float WAVE_FORMAT_EXTENSIBLE, 5.1 / 7.1.4 / stereo |
 
@@ -27,3 +27,19 @@ are). The listening WAVs and the raw multichannel beds are large and regenerable
 
 Note: this is a *model* of the Swift code, not the Swift code itself. It exists to make the DSP
 decisions measurable and reviewable; the app is the ground truth.
+
+Two rules the metrics depend on:
+
+- **A fresh kernel for every condition.** `KernelV1/V2.clone()` rebuilds a kernel from its
+  constructor arguments, and the transient sweep / mask-jitter metrics use it, because the running
+  masks, slow power and gate otherwise leak from one signal into the next and silently change the
+  result. A single shared kernel across the bed + four click levels once produced five identical,
+  meaningless rows.
+- **The false-trigger reference must be genuinely stationary.** `click_bed(clicks=False)` is *not*:
+  the bed is shaped around the click slots, so half-window statistics see steps there. Use the
+  Gaussian bed built inside `measure_transient_sweep`.
+
+`KernelV2` defaults describe the **shipped** kernel: one window, flux ratio 1.6, a 6-frame hard
+gate (0.15) whose depth the `transient` parameter scales linearly. The multi-resolution experiment
+of `docs/UPMIX-QUALITY.md` §3.5 is `multi_res=True` plus `onset_mode`; it is off by default and the
+measurements say it should stay that way.

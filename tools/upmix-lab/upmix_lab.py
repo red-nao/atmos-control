@@ -31,6 +31,9 @@ Metrics
   transient : click train -> attack level in the surrounds (should stay low).
   mask      : per-bin send-gain wobble inside a 1/3-octave band (the "shh" on sibilants
               and cymbals); band-aggregated decisions should flatten it.
+  gate      : from the probe, how fast (ms) and how deep (dB) the send gate reacts at a
+              click onset, plus what the gate costs in average send level (the ambience
+              the ducking takes away).
   null      : strength = 0 -> the bed must equal the input (bit-level passthrough).
   binaural  : round-trip through a cheap spherical-head HRTF: eardrum spectrum
               deviation vs plain stereo, and IACC (lower = more enveloping).
@@ -135,9 +138,17 @@ class KernelV1:
 
     name = "v1 (current)"
 
+    def clone(self):
+        """A fresh kernel with this one's configuration and no carried-over state.
+        Every measurement condition (bed, song, each click level) must start from a
+        fresh kernel: the running masks, slow averages and gate otherwise leak from one
+        signal into the next and silently corrupt the comparison."""
+        return type(self)(**self._ctor)
+
     def __init__(self, sr: int = SR, n: int = 2048, channels: int = 6,
                  center=1.0, surround_db=0.0, height_db=-6.0, decorr=0.7,
                  ambient_db=0.0, lfe=False, probe: bool = False):
+        self._ctor = {k: v for k, v in locals().items() if k != "self"}
         self.stft = STFT(n, sr)
         self.sr, self.n, self.hop, self.half = sr, n, n // 4, n // 2
         self.channels = channels
@@ -149,6 +160,7 @@ class KernelV1:
         self.lfe = lfe
         self.probe = probe            # record the shape-free send gain per bin/frame
         self.probe_send = []
+        self.probe_gate = []
         a = math.exp(-(self.hop / sr) / 0.050)
         self.alpha_pow = a
         # windows
@@ -169,6 +181,7 @@ class KernelV1:
         n, hop, half = self.n, self.hop, self.half
         if self.probe:
             self.probe_send = []
+            self.probe_gate = []
         out = np.zeros((self.channels, len(L) + n))
         pLL = np.zeros(half + 1)
         pRR = np.zeros(half + 1)
@@ -203,6 +216,7 @@ class KernelV1:
             ga = np.sqrt(1 - g2) * self.g_ambient
             if self.probe:
                 self.probe_send.append(20 * np.log10(np.maximum(ga, 1e-6)))
+                self.probe_gate.append(1.0)
             # direct L/C/R
             dl, dr = gd * A, gd * B
             m = 0.5 * (dl + dr)
@@ -278,16 +292,39 @@ class KernelV2:
          on broadband transients (sibilants, cymbals) and that flutter is the "shh-shh"
          haze.  A quarter of the per-bin estimate is kept so one very direct bin inside
          an ambient band is not swallowed whole.  Switchable (`band_agg=False`).
+     10. multi-resolution transients (`multi_res=True`) — **kept as an experiment, not
+         shipped**.  A second, half-length window runs on the newest samples of the same
+         input: the band masks take `min(long, short)` (`mr_mask`) and the onset gate can
+         be driven by the short window's flux (`onset_mode="short"`) or by the drift-free
+         half-window contrast (`onset_mode="contrast"`, no transform at all).  Measured
+         against the shipped detector under the same gate policy (hold 6 frames, instant
+         release), multi-resolution is *worse*, and the reason is structural: a shorter
+         window sits further from the newest samples, so an onset has to travel into the
+         block before it is inside that window at all, and the sharper ratio it then shows
+         has to be compared against a higher threshold.  See docs/UPMIX-QUALITY.md §3.5 for
+         the table.  Latency is unchanged either way; the cost is two extra FFTs of N/2.
     """
 
     name = "v2 (proposed)"
+
+    def clone(self):
+        """A fresh kernel with this one's configuration and no carried-over state.
+        Every measurement condition (bed, song, each click level) must start from a
+        fresh kernel: the running masks, slow averages and gate otherwise leak from one
+        signal into the next and silently corrupt the comparison."""
+        return type(self)(**self._ctor)
 
     def __init__(self, sr: int = SR, n: int = 2048, channels: int = 6,
                  center=1.0, surround_db=0.0, height_db=-6.0, decorr=0.7,
                  ambient_db=0.0, lfe=False, strength=1.0, transient=1.0,
                  reflections_db=-6.0, bass_hz=150.0, auto_level=True,
                  height_shape=SHAPE_HEIGHT, spread=0.6, band_agg=True,
-                 band_mix=0.25, probe: bool = False):
+                 band_mix=0.25, probe: bool = False,
+                 multi_res: bool = False, mr_mask: bool = True, onset_ratio: float = 1.6,
+                 onset_mode: str = "both", onset_ratio_s: float = 2.0,
+                 hold_frames: int = 6, release_ms: float = 40.0,
+                 instant_release: bool = True, gate_enable: bool = True):
+        self._ctor = {k: v for k, v in locals().items() if k != "self"}
         self.stft = STFT(n, sr)
         self.sr, self.n, self.hop, self.half = sr, n, n // 4, n // 2
         self.channels = channels
@@ -308,6 +345,9 @@ class KernelV2:
         self.band_mix = band_mix
         self.probe = probe            # record the shape-free send gain per bin/frame
         self.probe_send = []
+        self.probe_gate = []
+        self.probe_contrast = []
+        self.probe_ratio = []
         self.hop_s = self.hop / sr
         self.tau_pow = 0.120                                # cross-spectrum averaged 120 ms
         self.a_pow = math.exp(-self.hop_s / self.tau_pow)
@@ -344,6 +384,27 @@ class KernelV2:
         # decorrelation phases (same tables as V1 so only the algorithm differs)
         self.band_idx = band_index(n, sr)
         self.nbands = int(self.band_idx.max()) + 1
+        # multi-resolution state: a second analysis at half the window length, on the
+        # newest n/2 samples of the same block (same hop -> same frame grid, so the two
+        # resolutions stay sample-aligned and no extra latency is added).
+        self.multi_res = multi_res
+        self.mr_mask = mr_mask
+        self.onset_ratio = onset_ratio
+        self.onset_ratio_s = onset_ratio_s
+        self.onset_mode = onset_mode          # "long" | "short" | "both"
+        self.hold_frames = hold_frames
+        # True = the shipped policy: the duck lasts exactly hold_frames and then the gate
+        # jumps back to 1.0 (Swift: `onsetHold = 6`, gate 0.15).  False = P1-2 experiment:
+        # one-pole release with a release_ms time constant instead of the hard step.
+        self.instant_release = instant_release
+        self.gate_enable = gate_enable           # False = measure the mask on its own
+        self.ns = n // 2
+        self.stft_s = STFT(self.ns, sr) if multi_res else None
+        self.band_idx_s = band_index(self.ns, sr) if multi_res else None
+        # release_ms is in milliseconds — dividing the *seconds* hop by it directly
+        # gives a 1000x slower release (a 40 ms release became 40 s and the gate never
+        # reopened, which silently froze the masks shut for a whole measurement)
+        self.gate_release = math.exp(-self.hop_s / (release_ms * 0.001))
         self.phi = decorrelator_phase(max(channels, 6), half + 1, sr, n)
         self.ph = np.exp(1j * self.phi[:max(channels, 6)] * decorr)
         # front-ambience copies need their own (gentler) phase so they do not simply
@@ -373,11 +434,23 @@ class KernelV2:
         out = np.zeros((self.channels, len(L) + n))
         if self.probe:
             self.probe_send = []
+            self.probe_gate = []
+            self.probe_contrast = []
+            self.probe_ratio = []
         pLL = np.zeros(half + 1)
         pRR = np.zeros(half + 1)
         pLR = np.zeros(half + 1, dtype=complex)
         sD = np.zeros(half + 1)
         sDBand = np.zeros(self.nbands)
+        sDS = np.zeros(self.ns // 2 + 1)
+        sDBS = np.zeros(self.nbands)
+        qLL = np.zeros(self.ns // 2 + 1)
+        qRR = np.zeros(self.ns // 2 + 1)
+        qLR = np.zeros(self.ns // 2 + 1, dtype=complex)
+        self.pow_slow = 0.0
+        self.pow_slow_s = 0.0
+        self.onset_hold = 0
+        self.gate = 1.0
         a, eps, sqrt2 = self.a_pow, 1e-20, math.sqrt(2.0)
         twelve = self.channels == 12
         Lp = np.concatenate([np.zeros(n), L])
@@ -423,18 +496,97 @@ class KernelV2:
                 bandD = sDBand[self.band_idx]
                 d_sm = bandD + self.band_mix * (sD - bandD)
             else:
+                bandD = None
                 d_sm = sD
 
-            # onset gate: broadband flux -> hold the mask down (transients stay front)
-            pw = float(np.sum(ell + err))
-            ratio = pw / (self.pow_slow + eps)
-            self.pow_slow = 0.8 * self.pow_slow + 0.2 * pw
-            if ratio > 1.6 and self.transient > 0:
-                self.onset_hold = 6
+            # (10a) half-window contrast: the newest N/2 samples against the N/2 before
+            # them, straight from the input FIFO (no transform).  Unlike the flux ratio
+            # against a slow average, this statistic is drift-free and level-independent —
+            # for stationary material both halves carry the same energy by construction —
+            # so a threshold means the same thing for quiet and loud material.
+            contrast = 1.0
+            if self.onset_mode == "contrast":
+                half = n // 2
+                new_e = float(np.sum(Lp[i * hop + half:i * hop + n] ** 2
+                                     + Rp[i * hop + half:i * hop + n] ** 2))
+                old_e = float(np.sum(Lp[i * hop:i * hop + half] ** 2
+                                     + Rp[i * hop:i * hop + half] ** 2))
+                contrast = new_e / (old_e + 1e-20)
+
             gate = 1.0
+            if self.multi_res:
+                # (10) short-window analysis on the newest half of the same block
+                ns = self.ns
+                st_s = self.stft_s
+                ls = Lp[i * hop + n - ns:i * hop + n] * st_s.win
+                rs = Rp[i * hop + n - ns:i * hop + n] * st_s.win
+                As = np.fft.rfft(ls)
+                Bs = np.fft.rfft(rs)
+                qLL = a * qLL + (1 - a) * np.abs(As) ** 2
+                qRR = a * qRR + (1 - a) * np.abs(Bs) ** 2
+                qLR = a * qLR + (1 - a) * (As * np.conj(Bs))
+                g2s = np.clip((np.abs(qLR) ** 2 / (qLL * qRR + eps) - self.bias)
+                              / (1 - self.bias), 0, 1)
+                lsims = 2 * np.sqrt(qLL * qRR) / (qLL + qRR + eps)
+                d_raw_s = (1 - g2s) * lsims ** 3
+                sDS = np.where(d_raw_s < sDS,
+                               self.a_fast * sDS + (1 - self.a_fast) * d_raw_s,
+                               self.a_slow * sDS + (1 - self.a_slow) * d_raw_s)
+                pws = qLL + qRR
+                bps = np.bincount(self.band_idx_s, weights=pws, minlength=self.nbands)
+                bds = np.bincount(self.band_idx_s, weights=pws * d_raw_s,
+                                  minlength=self.nbands)
+                valids = bps > 1e-18
+                meant = np.where(valids, bds / (bps + eps), 0.0)
+                updt = np.where(meant < sDBS,
+                                self.a_fast * sDBS + (1 - self.a_fast) * meant,
+                                self.a_slow * sDBS + (1 - self.a_slow) * meant)
+                sDBS = np.where(valids, updt, sDBS)
+
+                # the two resolutions disagree exactly where a transient is diluted in
+                # the long window: taking the minimum keeps the attack in the front
+                if self.mr_mask and self.band_agg:
+                    bandD = np.minimum(bandD, sDBS[self.band_idx])
+                    d_sm = bandD + self.band_mix * (sD - bandD)
+
+                pws_tot = float(np.sum(np.abs(As) ** 2 + np.abs(Bs) ** 2))
+                ratio_s = pws_tot / (self.pow_slow_s + eps)
+                self.pow_slow_s = 0.8 * self.pow_slow_s + 0.2 * pws_tot
+
+            # ---- onset gate: one policy for every detector input -------------------
+            # The flux ratio is the frame's power against its own slow average.  A long
+            # window dilutes a transient (its energy is spread over 43 ms of surrounding
+            # material), so the same transient produces a much smaller ratio than it does
+            # in a 21 ms window — that is the whole reason for the second resolution.
+            # "both" requires the two window lengths to agree, which is what lets the
+            # thresholds be lowered without the gate firing on the bed itself.
+            pw = float(np.sum(ell + err))
+            ratio_l = pw / (self.pow_slow + eps)
+            self.pow_slow = 0.8 * self.pow_slow + 0.2 * pw
+            fire = ratio_l > self.onset_ratio
+            if self.onset_mode == "contrast":
+                fire = contrast > self.onset_ratio
+            elif self.multi_res:
+                if self.onset_mode == "short":
+                    fire = ratio_s > self.onset_ratio_s
+                elif self.onset_mode == "both":
+                    fire = (ratio_s > self.onset_ratio_s) and (ratio_l > self.onset_ratio)
+            if fire and self.transient > 0 and self.gate_enable:
+                self.onset_hold = self.hold_frames
+            # The `transient` control scales the duck depth smoothly: 1.0 = the full
+            # -16.5 dB duck, 0 = no gate at all (mask only). Depth 0.15 at 1.0 keeps the
+            # shipped behaviour bit-identical.
+            floor_gain = 1.0 - 0.85 * min(max(self.transient, 0.0), 1.0)
+            target = floor_gain if self.onset_hold > 0 else 1.0
+            if self.instant_release:
+                self.gate = target
+            elif target < self.gate:
+                self.gate = target                        # instant attack
+            else:
+                self.gate += (1 - self.gate_release) * (target - self.gate)
             if self.onset_hold > 0:
-                gate = 0.15
                 self.onset_hold -= 1
+            gate = self.gate
 
             D = np.clip(d_sm * gate * self.strength, 0, 1)         # (7) strength scales D
             gd = np.sqrt(1 - D)                                    # (2) power masks
@@ -464,6 +616,9 @@ class KernelV2:
 
             if self.probe:
                 self.probe_send.append(20 * np.log10(np.maximum(gsend, 1e-6)))
+                self.probe_gate.append(float(gate))
+                self.probe_contrast.append(float(contrast))
+                self.probe_ratio.append(float(ratio_l))
 
             al, ar = gsend * A, gsend * B
             spec[CH_LS] = self.g_surround * self.shapeS * self.ph[CH_LS] * al
@@ -757,10 +912,13 @@ def db(x: float) -> float:
 # ---------------------------------------------------------------------------
 def build(channels: int, **kw):
     """Measurement kernels: auto-level OFF, because it would mask the very level
-    behaviour we are measuring (pan-law flatness)."""
-    v1 = KernelV1(channels=channels, **kw)
-    v2 = KernelV2(channels=channels, auto_level=False, **kw)
-    return v1, v2
+    behaviour we are measuring (pan-law flatness).  The probes are ON so the metrics
+    can look at the send masks themselves (mask jitter, gate reaction)."""
+    v1 = KernelV1(channels=channels, probe=True, **kw)
+    v2 = KernelV2(channels=channels, auto_level=False, probe=True, multi_res=False, **kw)
+    v2m = KernelV2(channels=channels, auto_level=False, probe=True, multi_res=True, **kw)
+    v2m.name = "v2+multires [P1-2 x]"
+    return v1, v2, v2m
 
 
 def bed_power(y, skip=0, chans=None, tail=4096):
@@ -913,9 +1071,12 @@ def measure_song(kernels, sr=SR, channels=6, dur=8.0):
     return out
 
 
-def click_bed(sr=SR, dur=6.0, seed=3):
-    """A dry click train over a decaying, partly decorrelated bed: the test signal for
-    both the transient metric and the mask-jitter metric."""
+def click_bed(sr=SR, dur=6.0, seed=3, click_db=0.0, bed_db=-26.0, clicks=True):
+    """Click train over a *continuous* low-level diffuse bed, with a decaying partly
+    decorrelated tail after every click. The bed matters: with digital silence between
+    clicks every detector fires the moment the click enters a window, which hides the
+    difference between detectors. `click_db` sweeps the transient level above the bed,
+    `clicks=False` gives the bed alone (false-trigger reference)."""
     rng = np.random.default_rng(seed)
     t = np.arange(int(sr * dur)) / sr
     k = np.arange(int(sr * 0.002))
@@ -939,7 +1100,13 @@ def click_bed(sr=SR, dur=6.0, seed=3):
         m = seg.stop - seg.start
         tailL[seg] += 0.12 * (0.7 * a[:m] + 0.3 * c[:m])
         tailR[seg] += 0.12 * (0.7 * c[:m] + 0.3 * a[:m])
-    return 0.4 * clicks_ + tailL, 0.4 * clicks_ + tailR, onsets
+    # continuous diffuse bed (uncorrelated L/R), the thing a gate must *not* fire on
+    bed = 10 ** (bed_db / 20)
+    bedL = bed * rng.standard_normal(len(t))
+    bedR = bed * rng.standard_normal(len(t))
+    amp = 10 ** (click_db / 20)
+    lvl = amp if clicks else 0.0
+    return lvl * clicks_ + tailL + bedL, lvl * clicks_ + tailR + bedR, onsets
 
 
 def mask_jitter(send_db, sr, n, lo=500.0, hi=10000.0, floor_db=-35.0):
@@ -972,15 +1139,55 @@ def measure_mask_jitter(kernels, sr=SR, channels=12, n=2048, dur=4.0):
     for k in kernels:
         vals = []
         for L, R in ((Lb, Rb), (Ls, Rs)):
-            k.run(L, R)
-            vals.append(mask_jitter(k.probe_send, sr, n) if k.probe_send else float("nan"))
+            kn = k.clone()                     # state must not carry from bed to song
+            kn.run(L, R)
+            vals.append(mask_jitter(kn.probe_send, sr, n) if kn.probe_send else float("nan"))
         out[k.name] = tuple(vals)
     return out
 
 
-def measure_transient(kernels, sr=SR, channels=6):
+def gate_stats(kk, onsets, sr, n, channels):
+    """From the probe: (reaction ms, depth dB) per onset and the fraction of frames the
+    gate is closed on a *bed-only* signal (false triggers)."""
+    hop = n // 4
+    delays, depths = [], []
+    g = getattr(kk, "probe_send", None)
+    if g:
+        g = np.asarray(g)
+        f = np.arange(g.shape[1]) * (sr / n)
+        band = (f >= 500) & (f <= 10000)
+        gm = g[:, band].mean(axis=1)
+        for o in onsets:
+            # the click sits at input sample o; the analysis FIFO delays it by one window,
+            # so it first enters a frame window at ceil((o + n - n + 1)/hop) = floor(o/hop)+1
+            i_first = int(o // hop) + 1
+            if i_first < 4 or i_first + 12 >= len(gm):
+                continue
+            base = float(np.mean(gm[i_first - 4:i_first]))
+            win = gm[i_first:i_first + 12]
+            hit = np.where(win < base - 3.0)[0]
+            if len(hit):
+                delays.append(float(hit[0]) * hop / sr * 1000.0)
+                depths.append(base - float(np.min(win)))
+    return (float(np.mean(delays)) if delays else float("nan"),
+            float(np.mean(depths)) if depths else float("nan"))
+
+
+def gate_duty(kk):
+    """Fraction of frames where the send gate is closed on material with no transients."""
+    g = getattr(kk, "probe_gate", None)
+    if not g:
+        return float("nan")
+    g = np.asarray(g)
+    g = g[min(20, len(g) - 1):]
+    return float(np.mean(g < 0.9)) if len(g) else float("nan")
+
+
+def measure_transient(kernels, sr=SR, channels=6, n=2048):
     """Click + diffuse bed.  A good upmixer keeps the *attack* out of the surrounds:
-    attack/tail ratio below 1 means the transient was not spread to the rear."""
+    attack/tail ratio below 1 means the transient was not spread to the rear.  Also
+    reports how fast and how deep the send gate reacts at each onset (from the probe)."""
+    hop = n // 4
     L, R, onsets = click_bed(sr, 6.0)
     out = {}
     for kk in kernels:
@@ -996,7 +1203,54 @@ def measure_transient(kernels, sr=SR, channels=6):
                 att.append(float(np.mean(rear[a0:a1])) / (float(np.mean(front[a0:a1])) + 1e-20))
                 tail.append(float(np.mean(rear[t0:t1])) / (float(np.mean(front[t0:t1])) + 1e-20))
         r = (np.mean(att) / (np.mean(tail) + 1e-20)) if att else float("nan")
-        out[kk.name] = (r,)
+
+        # Gate reaction, straight from the probe: how soon after the onset first enters
+        # the analysis window does the send gain drop >3 dB, and how deep does it go.
+        # Both detectors see the same input samples, so this measures *contrast*, not
+        # lookahead: a long window dilutes a transient, the short one does not.
+        delay_ms, depth_db = gate_stats(kk, onsets, sr, n, channels)
+        gd = gate_duty(kk)
+        out[kk.name] = (r, delay_ms, depth_db, gd)
+    return out
+
+
+def measure_transient_sweep(kernels, sr=SR, channels=6, n=2048,
+                            levels=(-15.0, -10.0, -5.0, 0.0)):
+    """The metric that actually separates the detectors: how big must a transient be,
+    relative to the bed around it, before the upmixer keeps it out of the surrounds?
+    A long analysis window dilutes a transient (its energy is spread over 43 ms of
+    material), so its flux ratio — and therefore the gate — responds later and only to
+    louder transients.  Reporting the send attack leak per level also exposes the
+    opposite failure: a trigger-happy gate that fires on the bed itself."""
+    hop = n // 4
+    out = {}
+    for kk in kernels:
+        row = []
+        for lvl in levels:
+            k = kk.clone()                     # fresh state for every click level
+            L, R, onsets = click_bed(sr, 4.0, click_db=lvl)
+            y = k.run(L, R)
+            rear = np.sum(y[4:, :] ** 2, axis=0)
+            front = np.sum(y[:3, :] ** 2, axis=0)
+            att, tail = [], []
+            for o in onsets:
+                o = o + n                       # the FIFO delays the output by one window
+                a0, a1 = o + int(0.002 * sr), o + int(0.020 * sr)
+                t0, t1 = o + int(0.250 * sr), o + int(0.450 * sr)
+                if a1 < len(rear) and t1 < len(rear):
+                    att.append(float(np.mean(rear[a0:a1])) / (float(np.mean(front[a0:a1])) + 1e-20))
+                    tail.append(float(np.mean(rear[t0:t1])) / (float(np.mean(front[t0:t1])) + 1e-20))
+            r = (np.mean(att) / (np.mean(tail) + 1e-20)) if att else float("nan")
+            row.append(10 * math.log10(max(r, 1e-12)))
+        # false-trigger reference: the same bed without any clicks
+        # false-trigger reference: a *pure* stationary bed.  A click-bed with the clicks
+        # removed is not transient-free — the bed is amplitude-modulated around each click
+        # slot, and the half-window statistics see those steps.
+        k = kk.clone()
+        rng = np.random.default_rng(7)
+        Lb = (10 ** (-26 / 20.0)) * rng.standard_normal(int(4.0 * sr))
+        k.run(Lb, np.roll(Lb, 977))          # decorrelated second channel
+        out[kk.name] = (tuple(row), gate_duty(k))
     return out
 
 
@@ -1020,7 +1274,8 @@ def measure_loudness(sr=SR, channels=12, dur=8.0):
 
     variants = [("v1 (current)", KernelV1(channels=channels)),
                 ("v2 (auto level off)", KernelV2(channels=channels, auto_level=False)),
-                ("v2 (auto level on)", KernelV2(channels=channels, auto_level=True))]
+                ("v2 (auto level on)", KernelV2(channels=channels, auto_level=True)),
+                ("v2 + multi-res (a.l. off)", KernelV2(channels=channels, auto_level=False))]
     out = {}
     for name, k in variants:
         y = k.run(L, R)
@@ -1132,17 +1387,22 @@ def main():
 
     sr = SR
     channels = 12 if args.layout == "714" else 6
-    v1, v2 = build(channels)
+    v1, v2, v2m = build(channels)
+    # the transient metrics are the only ones where "same mask, no gate" is a meaningful
+    # reference: it separates what the P1-1 mask achieves from what the gate adds.
+    v2ng = KernelV2(channels=channels, auto_level=False, probe=True, gate_enable=False)
+    v2ng.name = "v2, mask only (no gate)"
+    tk = [v1, v2ng, v2, v2m]
 
     if args.all or args.compare:
         print(f"== atmos-control upmix lab · layout {args.layout} · {sr} Hz ==")
         print("   (auto-level disabled in the measurement kernels)\n")
         print("-- level response across the image (steady tone, 17 positions) --")
-        for name, (lo, hi, mean) in measure_pan([v1, v2], sr, channels).items():
+        for name, (lo, hi, mean) in measure_pan([v1, v2, v2m], sr, channels).items():
             print(f"   {name:16s} {lo:+.2f} .. {hi:+.2f} dB  (spread {hi-lo:4.2f} dB)")
         if args.curve:
             print("\n   pan position ->   " + " ".join(f"{p:+5.2f}" for p in np.linspace(-1, 1, 17)))
-            for k in (v1, v2):
+            for k in (v1, v2, v2m):
                 lv = []
                 n = int(0.6 * sr)
                 t = np.arange(n) / sr
@@ -1155,35 +1415,77 @@ def main():
                 print(f"   {k.name:16s} " + " ".join(f"{v:+5.2f}" for v in lv))
             print()
         print("\n-- centre source --")
-        for name, (lvl, cshare) in measure_center([v1, v2], sr, channels).items():
+        for name, (lvl, cshare) in measure_center([v1, v2, v2m], sr, channels).items():
             print(f"   {name:16s} level {lvl:+.2f} dB   centre share {10*math.log10(max(cshare,1e-12)):+6.1f} dB")
         print("\n-- 60 Hz centre bass (surround share; bass must stay in the front) --")
-        for name, (lf,) in measure_bass([v1, v2], sr, channels).items():
+        for name, (lf,) in measure_bass([v1, v2, v2m], sr, channels).items():
             print(f"   {name:16s} <120 Hz energy in the surrounds/height, vs input  "
                   f"{10*math.log10(max(lf,1e-12)):+6.1f} dB")
         print("\n-- hard-panned coherent tone (must stay in the front) --")
-        for name, (sur, front, l) in measure_hardpan([v1, v2], sr, channels).items():
+        for name, (sur, front, l) in measure_hardpan([v1, v2, v2m], sr, channels).items():
             print(f"   {name:16s} surround {10*math.log10(max(sur,1e-12)):+6.1f} dB"
                   f"   front {10*math.log10(max(front,1e-12)):+6.1f} dB"
                   f"   L {10*math.log10(max(l,1e-12)):+6.1f} dB")
         print("\n-- fully decorrelated input (ambience must go wide, not away) --")
-        for name, (sur, fr, lr, ic) in measure_diffuse([v1, v2], sr, channels).items():
+        for name, (sur, fr, lr, ic) in measure_diffuse([v1, v2, v2m], sr, channels).items():
             print(f"   {name:16s} surround share {10*math.log10(max(sur,1e-12)):+6.1f} dB"
                   f"   front/rear corr {fr:.3f}   Ls/Rs corr {lr:.3f}   IACC {ic:.3f}")
         print("\n-- click train + diffuse bed (attack/tail energy in the surrounds) --")
-        for name, (r,) in measure_transient([v1, v2], sr, channels).items():
-            print(f"   {name:16s} surround attack/tail {10*math.log10(max(r,1e-12)):+6.1f} dB")
+        for name, (r, delay, depth, duty) in measure_transient(tk, sr, channels).items():
+            gtxt = "   no gate" if not np.isfinite(delay) else \
+                f"   gate {delay:4.1f} ms / {depth:4.1f} dB, closed {100*duty:4.1f} %"
+            print(f"   {name:24s} surround attack/tail {10*math.log10(max(r,1e-12)):+6.1f} dB{gtxt}")
+        print("\n-- transient sensitivity: send attack leak vs click level above the bed --")
+        # every detector the P1-2 write-up compares (§3.5): the mask and the statistics
+        # are separated here, so "the min costs nothing" and "even the FFT-free variant
+        # loses" are reproducible from this file rather than from a one-off script.
+        extra = []
+        for nm, kw in (("v2 + short flux 2.0x", dict(multi_res=True, onset_mode="short",
+                                                     onset_ratio_s=2.0)),
+                       ("v2 + long+short AND", dict(multi_res=True, onset_mode="both")),
+                       ("v2 + mask min only", dict(multi_res=True, mr_mask=True,
+                                                   onset_mode="long", onset_ratio=1.6)),
+                       ("v2 + contrast 1.5x", dict(onset_mode="contrast", onset_ratio=1.5)),
+                       ("v2 + contrast 3.0x", dict(onset_mode="contrast", onset_ratio=3.0))):
+            k = KernelV2(channels=channels, auto_level=False, probe=True, **kw)
+            k.name = nm
+            extra.append(k)
+        sweep = measure_transient_sweep(tk + extra, sr, channels)
+        print("   click level            " + "".join(f"{lv:+8.0f} dB" for lv in (-15, -10, -5, 0))
+              + "   false triggers")
+        for name, (row, duty) in sweep.items():
+            print(f"   {name:24s} " + "".join(f"{v:+8.1f}   " for v in row)
+                  + f"   gate closed on {100*duty:4.1f} % of frames")
         print("\n-- surround-send mask jitter (per-bin gain wobble inside a critical band) --")
         pv1 = KernelV1(channels=channels, probe=True)
         pbin = KernelV2(channels=channels, auto_level=False, band_agg=False, probe=True)
         pbin.name = "v2, per-bin mask"
         pband = KernelV2(channels=channels, auto_level=False, band_agg=True, probe=True)
         pband.name = "v2, band-aggregated"
-        probes = [pv1, pbin, pband]
+        pv2m = KernelV2(channels=channels, auto_level=False, probe=True, multi_res=True)
+        pv2m.name = "v2+multires [P1-2 x]"
+        probes = [pv1, pbin, pband, pv2m]
         for name, (jb, js) in measure_mask_jitter(probes, sr, channels).items():
             print(f"   {name:20s} click+bed {jb:5.2f} dB   song {js:5.2f} dB")
+        # Band aggregation must not cost anything else: same gate reaction, same diffuse
+        # width.  Fresh kernels for each of the two metrics, or the click bed's state
+        # would still be in the masks when the diffuse signal arrives.
+        def probe_pair():
+            a = KernelV2(channels=channels, auto_level=False, probe=True, band_agg=False)
+            b = KernelV2(channels=channels, auto_level=False, probe=True, band_agg=True)
+            a.name = "v2, per-bin mask"
+            b.name = "v2, band-aggregated"
+            return a, b
+        tr = measure_transient(list(probe_pair()), sr, channels)
+        df = measure_diffuse(list(probe_pair()), sr, channels)
+        print("   (帯域集約の副作用: トランジェントと拡散入力)")
+        for name, (r, delay, depth, duty) in tr.items():
+            sur, fr, lr, ic = df[name]
+            print(f"   {name:20s} attack/tail {10*math.log10(max(r,1e-12)):+6.1f} dB"
+                  f"   gate {delay:4.1f} ms / {depth:4.1f} dB"
+                  f"   diffuse surround {10*math.log10(max(sur,1e-12)):+6.1f} dB   IACC {ic:.3f}")
         print("\n-- synthetic song: front-stage timbre + binaural width --")
-        for name, (dev, ic, ric, bdev) in measure_song([v1, v2], sr, channels,
+        for name, (dev, ic, ric, bdev) in measure_song([v1, v2, v2m], sr, channels,
                                                        dur=4.0 if args.quick else 8.0).items():
             print(f"   {name:16s} front L+R deviation {dev:5.2f} dB"
                   f"   IACC {ic:.3f} (stereo ref {ric:.3f})"
@@ -1195,7 +1497,7 @@ def main():
                 print(f"   {name:22s} bed {bed_db:+5.2f} dB   binaural {bi_db:+5.2f} dB"
                       f"   front pair {front_db:+5.2f} dB")
         print("\n-- passthrough null (strength = 0) --")
-        for name, d in measure_null([v1, v2], sr, channels).items():
+        for name, d in measure_null([v1, v2, v2m], sr, channels).items():
             print(f"   {name:16s} max |out - in| = {d:.3e}")
         print()
 
@@ -1211,7 +1513,7 @@ def main():
             L, R = L / peak * 0.5, R / peak * 0.5
         else:
             L, R = song(sr, 12.0)
-        for k, tag in ((v1, "v1"), (v2, "v2")):
+        for k, tag in ((v1, "v1"), (v2, "v2"), (v2m, "v2mr")):
             y = k.run(L, R)
             if args.wav_multichannel:
                 p = os.path.join(outdir, f"song_{tag}_{args.layout}.wav")

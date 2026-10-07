@@ -149,7 +149,7 @@ offline.
 | **Surround spread** | 0.5 … 1.3× — scales the surround speaker angles. | Narrower (<1) for a tighter stage, wider (>1) for a larger room. |
 | **LFE** | `Off` or `150 Hz low-pass`. Off by default: the low end is already in L/R, and the spatial mixer bypasses the LFE bus anyway. | Effectively diagnostic — leave Off. |
 | **Kernel** | `Classic` (the original first-generation extractor) or `Natural` (default). Natural fixes the centre-law level dip, stops hard-panned sound being treated as ambience, decides the direct/ambience split once per 1/3-octave band (so sibilants and cymbals stop fluttering), bass-manages the sends and synthesises the height layer from reflections. | Leave it on Natural; switch to Classic to hear exactly what the quality pass changed. |
-| **Transient preservation** | 0 … 1 — how fast the direct/ambience mask may open, plus an onset gate that briefly mutes the sends. | Keep at 1 for percussive material; lower it if you *want* attacks to bloom into the room. |
+| **Transient preservation** | 0 … 1 — how fast the direct/ambience mask may open, plus an onset gate that briefly mutes the sends. The slider scales the gate's duck depth continuously (1 = the full −16.5 dB duck, 0 = no gate); measured across the range the attack leak falls −1.3 → −8.7 dB while a whole song only loses 0.2 dB of send level. | Keep at 1 for percussive material; lower it if you *want* attacks to bloom into the room. |
 | **Reflections** | −24 … +6 dB — trim on the early-reflection layer that feeds the heights and rear surrounds (delayed, high-passed, HF-trimmed copies of the ground channels, weighted by physical adjacency, Auro-Matic style). | Raise for a more solid, "real room" height image; −24 dB to turn the synthesis off entirely. |
 | **Bass management on the sends** | 150 Hz high-pass on everything sent to the surrounds and heights, so the low end stays in the front. | Leave it on. Off is diagnostic: it is what the old kernel did, and it is why the bass detached from the front. |
 | **Auto level** | Slow (2 s) bed-domain trim so switching the upmixer on and off does not change the loudness. | Leave it on; turn it off to hear the raw upmix law in the lab measurements. |
@@ -161,8 +161,15 @@ auto-level off: the level response across the image is flat to 0.00 dB (Classic 
 a hard-panned tone leaks −10.3 dB instead of landing 100 % in the surrounds, sub-120 Hz energy in the
 sends drops from +0.9 dB to −17.8 dB, the front-stage timbre deviation on the synthetic song falls from
 8.9 dB to 1.6 dB, and the per-bin send-gain wobble inside a critical band (what a sibilant "shh"
-really is) drops from 2.8–4.1 dB to 0.6–0.7 dB. `python3 tools/upmix-lab/upmix_lab.py --compare` prints
-the whole table.
+really is) drops from 2.8–4.1 dB to 0.2–0.7 dB. A click at 0 dB over a −26 dB bed leaks 8.7 dB less
+into the surrounds (−5.0 → −8.7 dB), with no false triggers on stationary material.
+`python3 tools/upmix-lab/upmix_lab.py --compare` prints the whole table.
+
+A second, shorter analysis window for transient detection (the obvious next idea) was built, measured
+and **rejected**: a half-length window sits further from the newest samples, so it hears an onset
+*late*, and the shipped single-window gate beats it by 4.5 dB of attack leak. What shipped instead is
+the continuous gate depth above. The whole experiment is still in the lab behind `multi_res=True` and
+is written up in [`docs/UPMIX-QUALITY.md`](docs/UPMIX-QUALITY.md) §3.5.
 
 ## Soundstage
 

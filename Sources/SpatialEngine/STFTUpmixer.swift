@@ -640,7 +640,14 @@ final class STFTUpmixer {
         // front instead of being smeared into the rear channels. The detector runs on the
         // frame power below and takes effect on the next frame (one hop of lookahead,
         // which the STFT's own latency makes free).
-        let gate: Float = (onsetHold > 0 && pTransients > 0) ? 0.15 : 1
+        //
+        // The slider scales the duck depth instead of switching the gate on and off:
+        // 1 = the full −16.5 dB duck (0.15, what the kernel shipped with), 0 = no gate at
+        // all. Measured (tools/upmix-lab, click at 0 dB over a −26 dB bed): the attack
+        // leak falls monotonically, −1.3 → −8.7 dB across the range, while the send level
+        // a song loses over the whole range is only 0.2 dB — the duck is selective, so the
+        // smooth mapping costs nothing and makes the slider meaningful.
+        let gate: Float = onsetHold > 0 ? (1 - 0.85 * pTransients) : 1
 
         // The spectra are scratch that persists between frames: channels nobody writes
         // this frame would replay stale bins, so they are zeroed explicitly.
