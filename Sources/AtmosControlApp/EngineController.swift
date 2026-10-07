@@ -27,6 +27,12 @@ final class EngineController {
     var config = SpatialConfig()
     var lastError: String?
     var atmosPresent = false
+    var blackHolePresent = false
+    /// True when any loopback is present (bundled driver or BlackHole 16ch).
+    var loopbackPresent = false
+    /// Name of the device backing Surround 7.1.4 ("—" when none). UI copy so it is
+    /// honest about whether atmos-control or BlackHole is in use (Issue #1 §4).
+    var surroundCaptureName = "—"
     var outputName = "—"
 
     /// True when the tap start failed on (likely) audio-capture consent. We surface an
@@ -134,13 +140,14 @@ final class EngineController {
     @ObservationIgnored private var panelOcclusionObserver: NSObjectProtocol?
 
     /// The engine can run for the CURRENT capture choice. Personalized (tap) needs no driver;
-    /// the virtual-device options need the HAL device (Surround needs the 12-channel variant).
+    /// the virtual-device options need a loopback (Surround needs the 12-channel surface:
+    /// bundled driver or BlackHole 16ch, Issue #1 §4).
     /// The panel never collapses on this — a false value only disables the power toggle and
     /// shows an inline notice (F11).
     var canRun: Bool {
         switch captureChoice {
         case .personalized:  return true
-        case .virtualStereo: return atmosPresent
+        case .virtualStereo: return loopbackPresent
         case .surround:      return surroundDriverInstalled
         }
     }
@@ -183,8 +190,7 @@ final class EngineController {
 
     init() {
         EngineController.shared = self
-        atmosPresent = engine.atmosControlPresent()
-        surroundDriverInstalled = engine.surroundDriverInstalled()
+        refreshLoopbackFlags()
         let cur = SpatialEngine.currentDefaultOutput()
         outputName = cur.name
         outputs = engine.outputDevices()
@@ -386,12 +392,20 @@ final class EngineController {
 
     /// Re-enumerate the available real sinks; drop a selection that has vanished.
     func refreshDevices() {
-        atmosPresent = engine.atmosControlPresent()
-        surroundDriverInstalled = engine.surroundDriverInstalled()
+        refreshLoopbackFlags()
         outputs = engine.outputDevices()
         if let sel = selectedOutputID, !outputs.contains(where: { $0.id == sel }) {
             selectedOutputID = nil
         }
+    }
+
+    /// Single place that mirrors the engine's loopback discovery into published flags.
+    private func refreshLoopbackFlags() {
+        atmosPresent = engine.atmosControlPresent()
+        blackHolePresent = engine.blackHolePresent()
+        loopbackPresent = engine.loopbackPresent()
+        surroundDriverInstalled = engine.surroundDriverInstalled()
+        surroundCaptureName = engine.surroundCaptureName()
     }
 
     /// Sensible output-type default for a sink (used on power-on and device switch).
@@ -423,8 +437,7 @@ final class EngineController {
         handlingChange = true
         defer { handlingChange = false }
 
-        atmosPresent = engine.atmosControlPresent()
-        surroundDriverInstalled = engine.surroundDriverInstalled()
+        refreshLoopbackFlags()
         let devices = engine.outputDevices()
         outputs = devices
         if let sel = selectedOutputID, !devices.contains(where: { $0.id == sel }) { selectedOutputID = nil }
@@ -433,7 +446,7 @@ final class EngineController {
 
         guard isOn else {
             let cur = SpatialEngine.currentDefaultOutput()
-            if cur.id != SpatialEngine.atmosControlDeviceID() { outputName = cur.name }
+            if !SpatialEngine.isLoopbackDevice(cur.id) { outputName = cur.name }
             return
         }
         if let sink = activeSinkID, !devices.contains(where: { $0.id == sink }) {
@@ -447,7 +460,7 @@ final class EngineController {
     private func followDefaultOutputChange() {
         guard selectedOutputID == nil else { return }
         let cur = SpatialEngine.currentDefaultOutput()
-        if let loop = SpatialEngine.atmosControlDeviceID(), cur.id == loop { return }
+        if SpatialEngine.isLoopbackDevice(cur.id) { return }
         guard cur.id != kAudioObjectUnknown, cur.id != lastProfiledDeviceID else { return }
 
         applyProfile(for: cur.id)
@@ -583,8 +596,7 @@ final class EngineController {
     }
 
     func powerOn() {
-        atmosPresent = engine.atmosControlPresent()
-        surroundDriverInstalled = engine.surroundDriverInstalled()
+        refreshLoopbackFlags()
         permissionNeeded = false
         // Honour this device's profile before we touch any audio.
         if let sink = currentSinkID() { applyProfile(for: sink) }
@@ -669,13 +681,15 @@ final class EngineController {
         }
     }
 
-    /// Loopback capture: hijack the system default to the atmos-control HAL device.
+    /// Loopback capture: hijack the system default to the surround loopback device
+    /// (bundled atmos-control driver preferred, else BlackHole 16ch — Issue #1 §4).
     /// Generic HRTF only (personalization blocked by the virtual default); restores on off.
     private func startLoopbackMode() {
-        guard let atmos = SpatialEngine.atmosControlDeviceID() else {
-            lastError = "atmos-control device not found — install the HAL driver, or use Personalized (tap) mode."
+        guard let loop = SpatialEngine.surroundCaptureDeviceID() else {
+            lastError = "Surround loopback not found — install the HAL driver (./install.sh --with-driver), install BlackHole 16ch, or use Personalized (tap) mode."
             return
         }
+        let loopName = engine.surroundCaptureName()
         let current = SpatialEngine.currentDefaultOutput()
         savedDefault = current.id
         let devices = engine.outputDevices()
@@ -683,7 +697,7 @@ final class EngineController {
         let real: AudioOutputDevice?
         if let sel = selectedOutputID, let d = devices.first(where: { $0.id == sel }) {
             real = d
-        } else if current.id == atmos {
+        } else if SpatialEngine.isLoopbackDevice(current.id) {
             real = devices.first(where: { $0.isAirPods }) ?? devices.first
         } else {
             real = devices.first(where: { $0.id == current.id })
@@ -691,14 +705,15 @@ final class EngineController {
         if let r = real { config.outputType = outputType(for: r); outputName = r.name }
         engine.config = config
 
-        SpatialEngine.setDefaultOutput(atmos)
+        SpatialEngine.setDefaultOutput(loop)
         do {
-            try engine.start(outputDeviceID: real?.id, captureDeviceID: nil)
-            activeCaptureID = nil
-            activeSinkID = real?.id ?? (current.id != atmos ? current.id : nil)
+            try engine.start(outputDeviceID: real?.id, captureDeviceID: loop)
+            activeCaptureID = loop
+            activeSinkID = real?.id ?? (SpatialEngine.isLoopbackDevice(current.id) ? nil : current.id)
             isOn = true
             startWatchdog()
             lastError = nil
+            surroundCaptureName = loopName
             updateActivity()
         } catch {
             lastError = "\(error)"
@@ -713,9 +728,10 @@ final class EngineController {
         engine.stop()
         if tap.isActive { tap.stop() }
         // Restore the system default ONLY if loopback mode actually hijacked it (savedDefault
-        // set). Idle/tap quit (no hijack) must NOT touch routing — otherwise the terminate hook
-        // would yank the user's output to speakers on every quit even if we never powered on.
-        if activeCaptureID == nil && savedDefault != nil { restoreSafeDefault() } else { savedDefault = nil }
+        // set while in loopback mode). Idle/tap quit (no hijack) must NOT touch routing —
+        // otherwise the terminate hook would yank the user's output to speakers on every
+        // quit even if we never powered on.
+        if captureMode == .loopbackDriver && savedDefault != nil { restoreSafeDefault() } else { savedDefault = nil }
         isOn = false
         activeSinkID = nil
         activeCaptureID = nil
@@ -736,11 +752,10 @@ final class EngineController {
 
     /// Restore the system default to a present, real (non-virtual) device. Prefers the
     /// saved pre-power-on default; falls back to built-in speakers / any real sink so we
-    /// never strand the default on the atmos-control loopback (which black-holes audio).
+    /// never strand the default on a loopback (which black-holes audio).
     private func restoreSafeDefault() {
-        let atmos = SpatialEngine.atmosControlDeviceID()
         let present = engine.outputDevices()
-        if let s = savedDefault, s != atmos, present.contains(where: { $0.id == s }) {
+        if let s = savedDefault, !SpatialEngine.isLoopbackDevice(s), present.contains(where: { $0.id == s }) {
             SpatialEngine.setDefaultOutput(s)
         } else if let speakers = present.first(where: { $0.name.localizedCaseInsensitiveContains("speaker") })
                     ?? present.first(where: { !$0.isAirPods }) ?? present.first {
@@ -1017,12 +1032,12 @@ final class EngineController {
     // MARK: Device profiles (F7)
 
     /// The sink audio is (or would be) rendered to: the explicit choice, else the system
-    /// default — never the atmos-control loopback itself.
+    /// default — never a virtual loopback itself.
     private func currentSinkID() -> AudioDeviceID? {
         if let sel = selectedOutputID { return sel }
         if let active = activeSinkID { return active }
         let cur = SpatialEngine.currentDefaultOutput()
-        if let loop = SpatialEngine.atmosControlDeviceID(), cur.id == loop { return nil }
+        if SpatialEngine.isLoopbackDevice(cur.id) { return nil }
         return cur.id
     }
 

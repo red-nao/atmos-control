@@ -217,8 +217,8 @@ struct PanelView: View {
     private var runNotice: String? {
         guard !controller.canRun else { return nil }
         switch controller.captureChoice {
-        case .surround:      return "Surround needs the 12-channel driver — switch to Personalized (no driver needed)."
-        case .virtualStereo: return "Virtual device not installed — switch to Personalized (no driver needed)."
+        case .surround:      return "Surround needs a 12-channel loopback (atmos-control driver or BlackHole 16ch) — switch to Personalized (no driver needed)."
+        case .virtualStereo: return "Virtual device not installed (driver or BlackHole 16ch) — switch to Personalized (no driver needed)."
         case .personalized:  return nil
         }
     }

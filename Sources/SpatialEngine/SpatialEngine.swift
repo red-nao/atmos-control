@@ -183,7 +183,7 @@ public enum SpatialEngineError: Error, CustomStringConvertible {
     case atmosDeviceNotFound, noOutputDevice, setupFailed(String)
     public var description: String {
         switch self {
-        case .atmosDeviceNotFound: return "atmos-control loopback device not found (is the HAL driver installed?)"
+        case .atmosDeviceNotFound: return "surround loopback device not found (install the HAL driver with ./install.sh --with-driver, or install BlackHole 16ch)"
         case .noOutputDevice: return "no real output device available"
         case .setupFailed(let s): return "audio setup failed: \(s)"
         }
@@ -223,6 +223,12 @@ public final class SpatialEngine: @unchecked Sendable {
     /// True when the atmos-control virtual HAL device is present.
     public func atmosControlPresent() -> Bool { findAtmosControlDevice() != nil }
 
+    /// True when BlackHole 16ch is present (SIP-friendly alternative, Issue #1 §4).
+    public func blackHolePresent() -> Bool { findBlackHole16chDevice() != nil }
+
+    /// True when any virtual-device loopback is present (bundled driver or BlackHole).
+    public func loopbackPresent() -> Bool { atmosControlPresent() || blackHolePresent() }
+
     /// Channel count reported by the atmos-control loopback (0 = not installed). The 12-channel
     /// surround driver reports 12; the legacy stereo driver reports 2. Lets the UI offer (or
     /// disable) the Surround 7.1.4 capture option honestly.
@@ -232,14 +238,23 @@ public final class SpatialEngine: @unchecked Sendable {
                    deviceChannelCount(atmos, scope: kAudioObjectPropertyScopeInput))
     }
 
-    /// True when the installed loopback exposes the full 7.1.4 (≥12) channel surface.
-    public func surroundDriverInstalled() -> Bool { atmosControlChannelCount() >= kAtmos714Channels }
+    /// Channel width of the active surround capture device (0 = none installed).
+    /// BlackHole 16ch reports 16; the engine consumes the first 12 (13–16 reserved).
+    public func surroundCaptureChannels() -> Int { surroundCaptureChannelCount() }
 
-    /// Output-capable devices, excluding the atmos-control loopback itself.
+    /// Name of the active surround capture device ("—" when none). Shown in the UI
+    /// so it is honest about whether atmos-control or BlackHole backs Surround 7.1.4.
+    public func surroundCaptureName() -> String { surroundCaptureDeviceName() }
+
+    /// True when the installed loopback exposes the full 7.1.4 (≥12) channel surface,
+    /// via the bundled driver OR BlackHole 16ch.
+    public func surroundDriverInstalled() -> Bool { surroundCaptureChannelCount() >= kAtmos714Channels }
+
+    /// Output-capable devices, excluding the virtual loopbacks themselves
+    /// (bundled driver + BlackHole — selecting one as the sink would black-hole audio).
     public func outputDevices() -> [AudioOutputDevice] {
-        guard let atmos = findAtmosControlDevice() else { return [] }
         var out: [AudioOutputDevice] = []
-        for id in allDeviceIDs() where id != atmos && deviceHasChannels(id, scope: kAudioObjectPropertyScopeOutput) {
+        for id in allDeviceIDs() where !isVirtualLoopbackDevice(id) && deviceHasChannels(id, scope: kAudioObjectPropertyScopeOutput) {
             let name = deviceName(id)
             out.append(AudioOutputDevice(id: id, name: name, isAirPods: name.localizedCaseInsensitiveContains("airpods")))
         }
@@ -262,6 +277,12 @@ public final class SpatialEngine: @unchecked Sendable {
 
     public static func atmosControlDeviceID() -> AudioDeviceID? { findAtmosControlDevice() }
 
+    /// Active surround (7.1.4) capture device: bundled driver preferred, else BlackHole 16ch.
+    public static func surroundCaptureDeviceID() -> AudioDeviceID? { findSurroundCaptureDevice() }
+
+    /// True when `id` is a virtual loopback (bundled driver or BlackHole) — never a sink.
+    public static func isLoopbackDevice(_ id: AudioDeviceID) -> Bool { isVirtualLoopbackDevice(id) }
+
     /// Stable identifier for a device, for persistence: AudioDeviceIDs are reassigned on
     /// every boot, UIDs are not.
     public static func uid(of device: AudioDeviceID) -> String { deviceUID(device) }
@@ -277,10 +298,9 @@ public final class SpatialEngine: @unchecked Sendable {
 
     // MARK: Lifecycle
 
-    /// Build + start the graph. `outputDeviceID` is the *real* sink (e.g. AirPods);
-    /// nil resolves the current default output (when it isn't atmos-control).
     /// Build + start the graph. `outputDeviceID` is the real sink (nil = current default).
-    /// `captureDeviceID` overrides the capture source (nil = the atmos-control loopback);
+    /// `captureDeviceID` overrides the capture source (nil = the surround loopback —
+    /// bundled driver preferred, else BlackHole 16ch);
     /// the process-tap path passes a tap aggregate here to keep AirPods the default.
     public func start(outputDeviceID requested: AudioDeviceID? = nil, captureDeviceID: AudioDeviceID? = nil) throws {
         guard !isRunning else { return }
@@ -290,11 +310,11 @@ public final class SpatialEngine: @unchecked Sendable {
         if let c = captureDeviceID, c != AudioDeviceID(kAudioObjectUnknown) {
             captureID = c
         } else {
-            guard let atmosID = findAtmosControlDevice() else { throw SpatialEngineError.atmosDeviceNotFound }
-            captureID = atmosID
+            guard let loopID = findSurroundCaptureDevice() else { throw SpatialEngineError.atmosDeviceNotFound }
+            captureID = loopID
         }
         startedCaptureID = captureID   // remember so reconfigure()'s rebuild keeps the same capture source
-        let outID = try resolveOutput(requested: requested, atmosID: captureID)
+        let outID = try resolveOutput(requested: requested, captureID: captureID)
         outputDeviceID = outID
         cachedOutputName = deviceName(outID)
         pollTick = 0; cached3116 = false
@@ -302,30 +322,45 @@ public final class SpatialEngine: @unchecked Sendable {
             throw SpatialEngineError.setupFailed("capture nominal sample rate unreadable")
         }
         activeSampleRate = captureRate
-        let isLoopbackCapture = (captureID == findAtmosControlDevice())
+        let isLoopbackCapture = isVirtualLoopbackDevice(captureID)
         selog("Capture device : [\(captureID)] \(deviceName(captureID)) @ \(Int(captureRate)) Hz")
         selog("Playback device: [\(outID)] \(deviceName(outID))")
 
         // Surround modes capture 12ch from the 7.1.4 loopback; all other modes stereo.
+        // BlackHole 16ch reports 16ch native: the ring stays 12ch and planes 13–16
+        // are rendered but ignored (Issue #1 §4).
         let captureChannels = config.spatialize ? config.sourceMode.captureChannels : 2
+        let deviceNativeChannels = max(deviceChannelCount(captureID, scope: kAudioObjectPropertyScopeInput),
+                                       deviceChannelCount(captureID, scope: kAudioObjectPropertyScopeOutput),
+                                       captureChannels)
         let ctx = Ctx(channels: captureChannels)
         self.ctx = ctx
         let ctxPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(ctx).toOpaque())
 
-        // --- Capture unit (atmos-control → ring) ---
+        // --- Capture unit (loopback → ring) ---
         guard let captureUnit = makeHALOutputUnit() else { throw SpatialEngineError.setupFailed("capture unit") }
         ctx.captureUnit = captureUnit
         setEnableIO(captureUnit, enable: 0, scope: kAudioUnitScope_Output, element: 0, label: "capture")
         setEnableIO(captureUnit, enable: 1, scope: kAudioUnitScope_Input, element: 1, label: "capture")
         setCurrentDevice(captureUnit, deviceID: captureID, label: "capture")
+        // Prefer the engine width (12ch for surround, 2ch for stereo): the HAL converts.
+        // If the device rejects it (fixed-width loopback), fall back to native width and
+        // truncate in the RT callback (first N planes = canonical mapping).
+        var ablChannels = captureChannels
         var capFmt = captureChannels == 2 ? stereoFloat32Format(sampleRate: captureRate)
                                           : makeFloatASBD(channels: UInt32(captureChannels), sampleRate: captureRate)
-        guard setStreamFormat(captureUnit, fmt: &capFmt, scope: kAudioUnitScope_Output, element: 1, label: "capture") else {
-            teardown(); throw SpatialEngineError.setupFailed("capture stream format")
+        if !setStreamFormat(captureUnit, fmt: &capFmt, scope: kAudioUnitScope_Output, element: 1, label: "capture") {
+            selog("  WARN capture \(captureChannels)ch rejected by \(deviceName(captureID)) — trying native \(deviceNativeChannels)ch")
+            var nativeFmt = makeFloatASBD(channels: UInt32(deviceNativeChannels), sampleRate: captureRate)
+            guard setStreamFormat(captureUnit, fmt: &nativeFmt, scope: kAudioUnitScope_Output, element: 1, label: "capture(native)") else {
+                teardown(); throw SpatialEngineError.setupFailed("capture stream format")
+            }
+            ablChannels = deviceNativeChannels
         }
         var maxFrames: UInt32 = 4096; var mfSize = UInt32(MemoryLayout<UInt32>.size)
         AudioUnitGetProperty(captureUnit, kAudioUnitProperty_MaximumFramesPerSlice, kAudioUnitScope_Global, 0, &maxFrames, &mfSize)
-        ctx.captureABL = makeCaptureABL(maxFrames: maxFrames, channels: captureChannels)
+        ctx.captureABL = makeCaptureABL(maxFrames: maxFrames, channels: ablChannels)
+        ctx.captureDeviceChannels = ablChannels
         ctx.captureBufSize = maxFrames
         var inputCB = AURenderCallbackStruct(inputProc: captureInputCallback, inputProcRefCon: ctxPtr)
         check(AudioUnitSetProperty(captureUnit, kAudioOutputUnitProperty_SetInputCallback, kAudioUnitScope_Global, 0,
@@ -469,10 +504,11 @@ public final class SpatialEngine: @unchecked Sendable {
         isRunning = false
     }
 
-    private func resolveOutput(requested: AudioDeviceID?, atmosID: AudioDeviceID) throws -> AudioDeviceID {
-        if let r = requested, r != atmosID, deviceHasChannels(r, scope: kAudioObjectPropertyScopeOutput) { return r }
+    private func resolveOutput(requested: AudioDeviceID?, captureID: AudioDeviceID) throws -> AudioDeviceID {
+        if let r = requested, !isVirtualLoopbackDevice(r), r != captureID,
+           deviceHasChannels(r, scope: kAudioObjectPropertyScopeOutput) { return r }
         let def = defaultOutputDeviceID()
-        if def != AudioDeviceID(kAudioObjectUnknown), def != atmosID,
+        if def != AudioDeviceID(kAudioObjectUnknown), !isVirtualLoopbackDevice(def), def != captureID,
            deviceHasChannels(def, scope: kAudioObjectPropertyScopeOutput) { return def }
         if let first = outputDevices().first { return first.id }
         throw SpatialEngineError.noOutputDevice
@@ -522,7 +558,10 @@ public final class SpatialEngine: @unchecked Sendable {
             mSelector: kAudioDevicePropertyNominalSampleRate,
             mScope: kAudioObjectPropertyScopeGlobal, mElement: kAudioObjectPropertyElementMain)
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            DispatchQueue.main.async { self?.handleFormatChange() }
+            // Already on DispatchQueue.main (registered below) — call directly.
+            // Wrapping in DispatchQueue.main.async trips Swift 6.2 Sendable checking
+            // in release builds (Issue #1 §2).
+            self?.handleFormatChange()
         }
         if AudioObjectAddPropertyListenerBlock(device, &addr, DispatchQueue.main, block) == noErr {
             rateListeners.append((device, block))

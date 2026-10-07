@@ -257,6 +257,10 @@ final class Ctx: @unchecked Sendable {
     var totalPlayed:   UInt64 = 0
     var captureABL: UnsafeMutableAudioBufferListPointer? = nil
     var captureBufSize: UInt32 = 0
+    /// Number of buffers in `captureABL` (device-native width). Normally equals
+    /// `channels`; differs for BlackHole 16ch backing a 12ch ring (13–16 ignored,
+    /// Issue #1 §4). The RT capture path copies only the first `channels` planes.
+    var captureDeviceChannels: Int = 0
     // Per-channel peak (max |sample|) since last poll, one Float per capture channel.
     // Written on the capture RT thread, read+reset on the main thread — aligned Float
     // access is atomic on arm64.
@@ -297,6 +301,7 @@ final class Ctx: @unchecked Sendable {
         ring = RingBuffer(channels: channels)
         capturePeaks = .allocate(capacity: channels)
         capturePeaks.initialize(repeating: 0, count: channels)
+        captureDeviceChannels = channels
     }
     deinit { capturePeaks.deallocate() }
 }
@@ -367,15 +372,19 @@ nonisolated(unsafe) let captureInputCallback: AURenderCallback = { (
     // setup). If the HAL delivers a larger slice mid-session (device IO buffer grown in
     // Audio MIDI Setup / aggregate reconfig), rendering it would overflow the heap blocks.
     if n > ctx.captureBufSize { return noErr }
-    let ch = ctx.channels
+    // ABL width may exceed the ring width (BlackHole 16ch backing a 12ch ring:
+    // 13–16 are rendered but ignored). Prep all ABL buffers, consume only the first
+    // `channels` planes so the 7.1.4 mapping stays 1–12 (Issue #1 §4).
+    let ablCh = ctx.captureDeviceChannels > 0 ? ctx.captureDeviceChannels : ctx.channels
     var b = 0
-    while b < ch { abl[b].mDataByteSize = n * 4; b &+= 1 }
+    while b < ablCh { abl[b].mDataByteSize = n * 4; b &+= 1 }
     let status = AudioUnitRender(unit, ioActionFlags, inTimeStamp, inBusNumber, n, abl.unsafeMutablePointer)
     if status != noErr { return status }
     let written = ctx.ring.writeAll(from: abl, frameCount: n)
     ctx.totalCaptured &+= UInt64(written)
     // Per-channel peak (raw loop + fabsf — no Swift runtime calls on the RT thread).
     let cnt = Int(n)
+    let ch = ctx.channels
     var c = 0
     while c < ch {
         if let raw = abl[c].mData {

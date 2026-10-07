@@ -67,6 +67,70 @@ func findAtmosControlDevice() -> AudioDeviceID? {
     return nil
 }
 
+/// BlackHole 16ch (Existential Audio) loopback, usable as an alternative
+/// multichannel capture device for the 7.1.4 path (Issue #1 §4).
+/// Advantage over the bundled HAL driver: SIP can remain enabled.
+/// Channel mapping: 1–12 = canonical 7.1.4 (FL FR C LFE SL SR RL RR TFL TFR TRL TRR),
+/// 13–16 unused/reserved.
+func findBlackHole16chDevice() -> AudioDeviceID? {
+    for id in allDeviceIDs() {
+        let name = deviceName(id).lowercased()
+        guard name.contains("blackhole") else { continue }
+        let chans = max(deviceChannelCount(id, scope: kAudioObjectPropertyScopeOutput),
+                        deviceChannelCount(id, scope: kAudioObjectPropertyScopeInput))
+        if chans >= 12 { return id }
+    }
+    return nil
+}
+
+/// Which device backs the surround (7.1.4) loopback capture.
+/// Prefers the bundled atmos-control driver (exact 12ch) when present,
+/// falls back to BlackHole 16ch (first 12ch used, 13–16 ignored).
+func findSurroundCaptureDevice() -> AudioDeviceID? {
+    if let atmos = findAtmosControlDevice() {
+        let chans = max(deviceChannelCount(atmos, scope: kAudioObjectPropertyScopeOutput),
+                        deviceChannelCount(atmos, scope: kAudioObjectPropertyScopeInput))
+        if chans >= 12 { return atmos }
+        // Legacy stereo atmos driver present but not surround-capable: still
+        // allow BlackHole to back the surround path.
+        if findBlackHole16chDevice() != nil { return findBlackHole16chDevice() }
+        return nil
+    }
+    return findBlackHole16chDevice()
+}
+
+/// Channel width of the surround capture device (0 = none installed).
+func surroundCaptureChannelCount() -> Int {
+    guard let dev = findSurroundCaptureDevice() else { return 0 }
+    return max(deviceChannelCount(dev, scope: kAudioObjectPropertyScopeOutput),
+               deviceChannelCount(dev, scope: kAudioObjectPropertyScopeInput))
+}
+
+/// Human-readable name of the active surround capture device ("—" when none).
+func surroundCaptureDeviceName() -> String {
+    guard let dev = findSurroundCaptureDevice() else { return "—" }
+    return deviceName(dev)
+}
+
+/// True for any virtual loopback device we capture from (bundled driver or
+/// BlackHole). Such devices must never be offered as render sinks, set as the
+/// restored default, or treated as "followed" system output.
+func isVirtualLoopbackDevice(_ id: AudioDeviceID) -> Bool {
+    if id == AudioDeviceID(kAudioObjectUnknown) { return false }
+    if let atmos = findAtmosControlDevice(), id == atmos { return true }
+    if let bh = findBlackHole16chDevice(), id == bh { return true }
+    // Name-based fallback: AudioDeviceIDs are reassigned across boots, so if
+    // enumeration raced, still recognise the loopbacks by name.
+    let n = deviceName(id).lowercased()
+    if n.contains("atmos-control") { return true }
+    if n.contains("blackhole") {
+        let chans = max(deviceChannelCount(id, scope: kAudioObjectPropertyScopeOutput),
+                        deviceChannelCount(id, scope: kAudioObjectPropertyScopeInput))
+        return chans >= 12
+    }
+    return false
+}
+
 /// HDMI / DisplayPort sinks are usually an AV receiver or a TV that decodes multichannel
 /// itself — the natural default for those is "leave it alone" (bypass).
 func deviceTransportType(_ id: AudioDeviceID) -> UInt32 {
