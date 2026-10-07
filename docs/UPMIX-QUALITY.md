@@ -20,14 +20,15 @@ Spatialize Stereo・Sonos の TV Audio Swap と同レベルに持っていくに
 |---|------|---------------|---------------------|-----------|
 | 1 | 中央付近が沈む | パン掃引で **2.88 dB の落ち込み** | **0.00 dB (平坦)** | 中心則をエネルギー保存形に (`γ = √(2(2c−c²))`) |
 | 2 | ハードパン音が後ろへ飛ぶ | 定位 **100 % がサラウンド** (前 −120 dB) | サラウンド −10.3 dB / 前 −0.4 dB | アンビエンス判定に「L/R のレベルが同程度」条件を追加 |
-| 3 | 低域が後ろ・上へ漏れる | <120 Hz が sur/height に **+0.9 dB** | **−17.5 dB** | 送出側に 150 Hz ハイパス (bass management) |
+| 3 | 低域が後ろ・上へ漏れる | <120 Hz が sur/height に **+0.9 dB** | **−17.8 dB** | 送出側に 150 Hz ハイパス (bass management) |
 | 4 | アップミックス ON で音量が上がる | COLA 1.5 で除算 → **+2.5 dB** ホット | 後段 AGC で on/off 一致 (auto level) | 除算を 2.0 に修正 + ゆっくりしたレベル補正 |
-| 5 | アタックが後ろに回る | アタック/テール比 −1.4 dB | −4.7 dB (7.1.4) / −10.2 dB (5.1) | 非対称平滑 + オンセットゲート |
+| 5 | アタックが後ろに回る | アタック/テール比 −1.4 dB | −4.4 dB (7.1.4) / −10.3 dB (5.1) | 非対称平滑 + オンセットゲート |
+| 5b | サ行・シンバルに「シュワシュワ」した膜がかぶる | 帯域内の送出ゲインの揺れ 2.8–4.1 dB | **0.6–0.7 dB** | 拡散度判定を 1/3 オクターブ帯域単位に集約 (P1-1) |
 | 6 | ハイトが「明るい膜」のような不自然さ | >2 kHz の位相拡散コピーのみ | 下の層の遅延・帯域整形コピー (反射) | Auro-Matic 型の反射レイヤー |
-| 7 | 音楽が痩せる / 定位がぼやける | 前 L+R の音色偏差 8.88 dB | **1.45 dB** | 直接音を透過させるマスク (冪等・エネルギー保存) |
+| 7 | 音楽が痩せる / 定位がぼやける | 前 L+R の音色偏差 8.88 dB | **1.57 dB** | 直接音を透過させるマスク (冪等・エネルギー保存) |
 
 測定条件は 48 kHz / FFT 2048 / auto-level off、レイアウト 7.1.4 と 5.1 の両方。
-生の表は `tools/upmix-lab/out/measurements-714.txt` と `measurements-51.txt`。
+生の表は `tools/upmix-lab/results/measurements-714.txt` と `measurements-51.txt`。
 
 **やることは 3 段階です:**
 
@@ -89,8 +90,8 @@ v2 (proposed)  -10.3 dB     -0.4 dB     -0.4 dB     ← 前の定位を保つ
 低域 (60 Hz 中心、デコリレート済み) とトランジェント:
 
 ```
-<120 Hz energy in the surrounds/height, vs input:   v1 +0.9 dB   → v2 −17.5 dB
-surround attack/tail (click train):                 v1 −1.4 dB   → v2 −4.7 dB
+<120 Hz energy in the surrounds/height, vs input:   v1 +0.9 dB   → v2 −17.8 dB
+surround attack/tail (click train):                 v1 −1.4 dB   → v2 −4.4 dB
 ```
 
 原因は推定器の設計です。現行は「コヒーレンス γ² が低い = アンビエンス」という 1 条件だけで判定しますが、
@@ -122,9 +123,9 @@ Auro-3D も Dolby も、アップミックスしたチャンネルには必ず�
 ### 1.5 トランジェントと音色
 
 ```
-synthetic song: front L+R deviation 8.88 dB → 1.45 dB   (7.1.4)
-                eardrum deviation    4.87 dB → 2.33 dB
-                IACC 0.853 (stereo ref 0.923) → 0.885
+synthetic song: front L+R deviation 8.88 dB → 1.57 dB   (7.1.4)
+                eardrum deviation    4.87 dB → 2.64 dB
+                IACC 0.853 (stereo ref 0.923) → 0.887
 ```
 
 「前 L+R の音色偏差 8.88 dB」= 直接音がマスク処理で壊れている、という意味です。Auro-Matic が
@@ -145,13 +146,13 @@ synthetic song: front L+R deviation 8.88 dB → 1.45 dB   (7.1.4)
 ```
                         bed       binaural   front pair
 v1 (current)          -0.11 dB   -0.42 dB   -6.93 dB
-v2 (auto level off)   +0.35 dB   -0.11 dB   -3.61 dB
-v2 (auto level on)    +0.15 dB   -0.33 dB   -3.80 dB
+v2 (auto level off)   +0.38 dB   -0.05 dB   -3.55 dB
+v2 (auto level on)    +0.16 dB   -0.29 dB   -3.77 dB
 ```
 
 - v1 は**前 2ch が 6.93 dB も痩せる** (拡散成分が後方へ移り、直接音もマスクで削られる)。
   これが「アップミックスすると中身が薄くなる」の正体で、v2 では −3.6 dB まで緩和。
-- 総量は v1/v2 とも ±0.5 dB 以内。v2 の `auto level` はベッド合計を入力に合わせて +0.35 → +0.15 dB。
+- 総量は v1/v2 とも ±0.5 dB 以内。v2 の `auto level` はベッド合計を入力に合わせて +0.38 → +0.16 dB。
 - 前 2ch の残存量は `Ambience spread` で調整できます (既定 0.6。小さくすると前方の量感が増えます)。
 
 ---
@@ -205,6 +206,8 @@ v2 (auto level on)    +0.15 dB   -0.33 dB   -3.80 dB
 lsim = 2√(P_LL·P_RR)/(P_LL+P_RR)        # レベル類似度
 D    = (1 − γ²)·lsim³                    # 拡散度マスク (0=直接音, 1=アンビエンス)
 D   ← 非対称平滑 (直接寄りは速く τ≈5–30 ms [transients], 拡散寄りは遅く τ≈150 ms)
+D   ← 1/3 オクターブ帯域でパワー重み付き平均 → 帯域値も同じ非対称則で平滑
+D   ← 0.75·(帯域値) + 0.25·(ビン値)         # P1-1: 帯域内のコントラストを少し残す
 D   ← D · gate · strength                # gate: オンセット検出で 6 フレーム 0.15 倍
 gd     = √(1 − D)                        # 直接音マスク
 gSend  = √(D·spread)·ambient             # サラウンド/ハイトへ
@@ -256,14 +259,42 @@ Vhl' = gSend·HP150·LP7k(L) + 反射レイヤー
 既存の `Center strength` / `Surround level` / `Height level` / `Decorrelation` / `Ambient bias` /
 `Surround spread` / `LFE` / `FFT size` はそのままです。
 
+### 3.4 マスク判定のクリティカルバンド集約 (P1-1、実装済み)
+
+ビンごとに拡散度を決めると、ブロードバンドな過渡 (サ行・シンバル・拍手) で判定が
+フレームごとに暴れます。その結果、**送出ゲインのスペクトルが 10 ms ごとに別のコーム (くし形) に
+なる** — これが「シュワシュワ」「ザラザラ」という膜の正体です。耳はこれを残響ではなく
+「粗さ」として聞きます。
+
+対策は「判定だけを荒くする」ことです。1/3 オクターブ帯域 (63 Hz 基準、`band = floor(3·log2(f/63))`) で
+パワー重み付き平均をとり、帯域値も同じ非対称平滑にかけたうえで、**ビン値の 25 % を混ぜ戻します**
+(帯域内に 1 本だけ強い直接音のビンがある場合、それを丸ごと飲み込まないため)。
+
+実測 (`--compare` の mask jitter 行。帯域内の送出ゲインのばらつき、小さいほど滑らか):
+
+```
+                          クリック列+拡散ベッド   合成楽曲
+v1 (current)                   2.78 dB            2.82 dB
+v2, per-bin mask               2.36 dB            4.05 dB
+v2, band-aggregated            0.60 dB            0.68 dB     ← 約 1/4〜1/6
+```
+
+副作用も小さい: トランジェント指標は −4.4 dB (バンド集約前 −4.7 dB)、
+拡散入力の IACC は 0.101 (前 0.103)、パン平坦性・センター・低域・null はすべて不変です。
+聴感上は「アタックの粒立ち」を保ったまま、高域の粗さだけが減る方向に働きます。
+
+※ 実装上の注意: 帯域値を確定してからビンを描画する必要があるため、
+`processFrameNatural()` は **①コヒーレンス/拡散度の集計 → ②帯域の平滑 → ③描画** の 2 パス構成です。
+入力スペクトル (`aRe/aIm` など) はそのまま残っているので、メモリは増えていません (追加は
+帯域数ぶんの 3 本の Float 配列と bin→band の Int テーブルだけ)。
+
 ---
 
-## 4. P1 — 次にやるべきこと (まだ未実装)
+## 4. P1 — 次の候補 (P1-1 は完了)
 
-1. **帯域集約 (critical band) でのマスク決定**
-   現在は 1 ビンごとに `D` を決めるため、狭帯域のノイズやクリックでマスクが暴れます。
-   1/3 オクターブ程度にまとめてから決め、**ビンごとの値は再配分**すると、ハイハットや
-   サ行の「シュワシュワした位相感」が減ります。
+1. ~~**帯域集約 (critical band) でのマスク決定**~~ — **完了 (§3.4)**。
+   1/3 オクターブ帯域で判定し、ビン値の 25 % を混ぜ戻す方式。送出ゲインの揺れが
+   2.8–4.1 dB → 0.6–0.7 dB。
 2. **マルチレゾリューション (2 つ目の短い窓)**
    1024 と 2048 を同時に走らせ、オンセット検出とトランジェントのマスクだけ短い窓から取る方式。
    レイテンシは増やさずに、アタックの精度だけ上げられます。
@@ -302,15 +333,15 @@ Vhl' = gSend·HP150·LP7k(L) + 反射レイヤー
 
 ```bash
 # 1) 測定 (Python 3 + numpy のみ)
-python3 tools/upmix-lab/upmix_lab.py --compare --level --layout 714
-python3 tools/upmix-lab/upmix_lab.py --compare          --layout 51
+python3 tools/upmix-lab/upmix_lab.py --compare --level --curve --layout 714
+python3 tools/upmix-lab/upmix_lab.py --compare --layout 51
 
-# 2) 聴き比べ用 WAV (48 kHz / IEEE float / 7.1.4)
+# 2) 聴き比べ用 WAV (48 kHz / IEEE float / 7.1.4) — out/ に生成 (git 管理外)
 python3 tools/upmix-lab/upmix_lab.py --wav --layout 714
 #   out/song_input_stereo.wav            元のステレオ
 #   out/song_stereo_binaural_ref.wav     ±30° に置いただけのステレオ (基準)
 #   out/song_v1_714_binaural.wav         現行カーネル
-#   out/song_v2_714_binaural.wav         提案カーネル
+#   out/song_v2_714_binaural.wav         提案カーネル (Classic を含む両カーネルはアプリで切替)
 python3 tools/upmix-lab/upmix_lab.py --wav --layout 714 --wav-multichannel   # 生の 7.1.4 ベッド
 
 # 3) 自分の曲で
@@ -364,7 +395,7 @@ ATMOS_PREVIEW=1 open -n dist/atmos-control.app
 
 ## 付録 A. 実測表 (生データ)
 
-7.1.4 と 5.1 の全表は `tools/upmix-lab/out/measurements-714.txt` /
+7.1.4 と 5.1 の全表は `tools/upmix-lab/results/measurements-714.txt` /
 `measurements-51.txt` にあります (このドキュメントの数値はそこから引用)。
 
 ## 付録 B. 参考文献

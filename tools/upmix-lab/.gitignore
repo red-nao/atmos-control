@@ -1,3 +1,5 @@
-# The listening WAVs are regenerable and large; keep them out of git.
-out/*.wav
+# out/ holds the large, regenerable listening files (WAVs, raw beds) — not tracked.
+# results/ holds the small text measurement tables — tracked, they are the evidence
+# behind the numbers quoted in docs/UPMIX-QUALITY.md.
+out/
 __pycache__/

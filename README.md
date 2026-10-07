@@ -148,7 +148,7 @@ offline.
 | **Ambient bias** | −12 … +12 dB — level trim on the ambience that is sent to the surrounds and heights. | Positive for a more reverberant, "in the room" feel; negative for focus and intelligibility. |
 | **Surround spread** | 0.5 … 1.3× — scales the surround speaker angles. | Narrower (<1) for a tighter stage, wider (>1) for a larger room. |
 | **LFE** | `Off` or `150 Hz low-pass`. Off by default: the low end is already in L/R, and the spatial mixer bypasses the LFE bus anyway. | Effectively diagnostic — leave Off. |
-| **Kernel** | `Classic` (the original first-generation extractor) or `Natural` (default). Natural fixes the centre-law level dip, stops hard-panned sound being treated as ambience, bass-manages the sends and synthesises the height layer from reflections. | Leave it on Natural; switch to Classic to hear exactly what the quality pass changed. |
+| **Kernel** | `Classic` (the original first-generation extractor) or `Natural` (default). Natural fixes the centre-law level dip, stops hard-panned sound being treated as ambience, decides the direct/ambience split once per 1/3-octave band (so sibilants and cymbals stop fluttering), bass-manages the sends and synthesises the height layer from reflections. | Leave it on Natural; switch to Classic to hear exactly what the quality pass changed. |
 | **Transient preservation** | 0 … 1 — how fast the direct/ambience mask may open, plus an onset gate that briefly mutes the sends. | Keep at 1 for percussive material; lower it if you *want* attacks to bloom into the room. |
 | **Reflections** | −24 … +6 dB — trim on the early-reflection layer that feeds the heights and rear surrounds (delayed, high-passed, HF-trimmed copies of the ground channels, weighted by physical adjacency, Auro-Matic style). | Raise for a more solid, "real room" height image; −24 dB to turn the synthesis off entirely. |
 | **Bass management on the sends** | 150 Hz high-pass on everything sent to the surrounds and heights, so the low end stays in the front. | Leave it on. Off is diagnostic: it is what the old kernel did, and it is why the bass detached from the front. |
@@ -156,10 +156,13 @@ offline.
 | **FFT size** | 1024 (21 ms @48 kHz) or 2048 (43 ms). Larger = finer frequency resolution, better separation, more latency. | 2048 for music where separation matters; 1024 if you notice lip-sync drift on video. |
 | **Added latency** | Read-only: the algorithmic delay the upmixer adds. | Audio lagging video is tolerated up to roughly 125 ms, so both sizes are safe — but this is the number to check. |
 
-Measured on the bench (`tools/upmix-lab/out/`), 7.1.4, auto-level off: the level response across the
-image is flat to 0.00 dB (Classic dips 2.88 dB mid-pan), a hard-panned tone leaks −10.3 dB instead of
-landing 100 % in the surrounds, sub-120 Hz energy in the sends drops from +0.9 dB to −17.5 dB, and the
-front-stage timbre deviation on the synthetic song falls from 8.88 dB to 1.45 dB.
+Measured on the bench (`tools/upmix-lab/`, raw tables in `tools/upmix-lab/results/`), 7.1.4,
+auto-level off: the level response across the image is flat to 0.00 dB (Classic dips 2.88 dB mid-pan),
+a hard-panned tone leaks −10.3 dB instead of landing 100 % in the surrounds, sub-120 Hz energy in the
+sends drops from +0.9 dB to −17.8 dB, the front-stage timbre deviation on the synthetic song falls from
+8.9 dB to 1.6 dB, and the per-bin send-gain wobble inside a critical band (what a sibilant "shh"
+really is) drops from 2.8–4.1 dB to 0.6–0.7 dB. `python3 tools/upmix-lab/upmix_lab.py --compare` prints
+the whole table.
 
 ## Soundstage
 

@@ -29,6 +29,8 @@ Metrics
   diffuse   : fully decorrelated input -> surround energy share, front/surround
               correlation (should be ~0), and the binaural inter-aural coherence.
   transient : click train -> attack level in the surrounds (should stay low).
+  mask      : per-bin send-gain wobble inside a 1/3-octave band (the "shh" on sibilants
+              and cymbals); band-aggregated decisions should flatten it.
   null      : strength = 0 -> the bed must equal the input (bit-level passthrough).
   binaural  : round-trip through a cheap spherical-head HRTF: eardrum spectrum
               deviation vs plain stereo, and IACC (lower = more enveloping).
@@ -135,7 +137,7 @@ class KernelV1:
 
     def __init__(self, sr: int = SR, n: int = 2048, channels: int = 6,
                  center=1.0, surround_db=0.0, height_db=-6.0, decorr=0.7,
-                 ambient_db=0.0, lfe=False):
+                 ambient_db=0.0, lfe=False, probe: bool = False):
         self.stft = STFT(n, sr)
         self.sr, self.n, self.hop, self.half = sr, n, n // 4, n // 2
         self.channels = channels
@@ -145,6 +147,8 @@ class KernelV1:
         self.decorr = decorr
         self.g_ambient = 10 ** (ambient_db / 20)
         self.lfe = lfe
+        self.probe = probe            # record the shape-free send gain per bin/frame
+        self.probe_send = []
         a = math.exp(-(self.hop / sr) / 0.050)
         self.alpha_pow = a
         # windows
@@ -163,6 +167,8 @@ class KernelV1:
     def run(self, L: np.ndarray, R: np.ndarray):
         st = self.stft
         n, hop, half = self.n, self.hop, self.half
+        if self.probe:
+            self.probe_send = []
         out = np.zeros((self.channels, len(L) + n))
         pLL = np.zeros(half + 1)
         pRR = np.zeros(half + 1)
@@ -195,6 +201,8 @@ class KernelV1:
             beta = (pLL - pRR) / (pLL + pRR + eps)
             gd = np.sqrt(g2)
             ga = np.sqrt(1 - g2) * self.g_ambient
+            if self.probe:
+                self.probe_send.append(20 * np.log10(np.maximum(ga, 1e-6)))
             # direct L/C/R
             dl, dr = gd * A, gd * B
             m = 0.5 * (dl + dr)
@@ -223,6 +231,16 @@ class KernelV1:
                 out[ch, i * hop:i * hop + n] += np.fft.irfft(spec[ch], n) * st.win
         out /= st.cola
         return out[:, n:n + len(L)]          # drop the latency priming
+
+
+# ---------------------------------------------------------------------------
+# Critical bands (1/3 octave), shared by the kernel and the mask metric
+# ---------------------------------------------------------------------------
+def band_index(n: int, sr: int, origin: float = 63.0):
+    """1/3-octave band index per FFT bin, from `origin` Hz: floor(3*log2(f/origin)).
+    Duplicated in STFTUpmixer.swift — keep the two in step."""
+    f = np.arange(n // 2 + 1) * (sr / n)
+    return np.maximum(0, np.floor(3 * np.log2(np.maximum(f, 1.0) / origin))).astype(int)
 
 
 # ---------------------------------------------------------------------------
@@ -255,6 +273,11 @@ class KernelV2:
       7. strength: 0..1 master control scaling the whole effect (0 = passthrough).
       8. auto level: slow (500 ms) bed-domain gain trim so toggling upmix does not
          change loudness.
+      9. the diffuseness decision is taken per critical band (1/3 octave) instead of per
+         bin, then blended back into the bins: a per-bin decision flutters frame to frame
+         on broadband transients (sibilants, cymbals) and that flutter is the "shh-shh"
+         haze.  A quarter of the per-bin estimate is kept so one very direct bin inside
+         an ambient band is not swallowed whole.  Switchable (`band_agg=False`).
     """
 
     name = "v2 (proposed)"
@@ -263,7 +286,8 @@ class KernelV2:
                  center=1.0, surround_db=0.0, height_db=-6.0, decorr=0.7,
                  ambient_db=0.0, lfe=False, strength=1.0, transient=1.0,
                  reflections_db=-6.0, bass_hz=150.0, auto_level=True,
-                 height_shape=SHAPE_HEIGHT, spread=0.6):
+                 height_shape=SHAPE_HEIGHT, spread=0.6, band_agg=True,
+                 band_mix=0.25, probe: bool = False):
         self.stft = STFT(n, sr)
         self.sr, self.n, self.hop, self.half = sr, n, n // 4, n // 2
         self.channels = channels
@@ -280,13 +304,19 @@ class KernelV2:
         self.bass_hz = bass_hz
         self.auto_level = auto_level
         self.height_shape = height_shape
+        self.band_agg = band_agg
+        self.band_mix = band_mix
+        self.probe = probe            # record the shape-free send gain per bin/frame
+        self.probe_send = []
         self.hop_s = self.hop / sr
         self.tau_pow = 0.120                                # cross-spectrum averaged 120 ms
         self.a_pow = math.exp(-self.hop_s / self.tau_pow)
         # effective number of independent looks: window-hopping means roughly
         # tau/hop frames, of which only the 25 % un-overlapped part is new information
         self.bias = 1.0 / max(self.tau_pow / self.hop_s, 1.0)
-        self.a_fast = math.exp(-self.hop_s / (0.010 * max(transient, 1e-3)))
+        # Transient preservation maps to the mask's opening time constant: 30 ms at 0
+        # (gently asymmetric) down to 5 ms at 1. MUST stay in step with STFTUpmixer.swift.
+        self.a_fast = math.exp(-self.hop_s / (0.030 - 0.025 * min(max(transient, 0.0), 1.0)))
         self.a_slow = math.exp(-self.hop_s / 0.150)
         self.a_lvl = math.exp(-self.hop_s / 0.500)
         self.alpha_dc = math.exp(-2 * math.pi * 20 / sr)      # 20 Hz one-pole (bass mgmt)
@@ -312,6 +342,8 @@ class KernelV2:
         self.lfeW = np.where(f < 120, 1.0,
                              np.where(f < 180, 0.5 + 0.5 * np.cos(np.pi * (f - 120) / 60), 0.0))
         # decorrelation phases (same tables as V1 so only the algorithm differs)
+        self.band_idx = band_index(n, sr)
+        self.nbands = int(self.band_idx.max()) + 1
         self.phi = decorrelator_phase(max(channels, 6), half + 1, sr, n)
         self.ph = np.exp(1j * self.phi[:max(channels, 6)] * decorr)
         # front-ambience copies need their own (gentler) phase so they do not simply
@@ -339,10 +371,13 @@ class KernelV2:
         st = self.stft
         n, hop, half = self.n, self.hop, self.half
         out = np.zeros((self.channels, len(L) + n))
+        if self.probe:
+            self.probe_send = []
         pLL = np.zeros(half + 1)
         pRR = np.zeros(half + 1)
         pLR = np.zeros(half + 1, dtype=complex)
         sD = np.zeros(half + 1)
+        sDBand = np.zeros(self.nbands)
         a, eps, sqrt2 = self.a_pow, 1e-20, math.sqrt(2.0)
         twelve = self.channels == 12
         Lp = np.concatenate([np.zeros(n), L])
@@ -371,6 +406,25 @@ class KernelV2:
             sD = np.where(fast, self.a_fast * sD + (1 - self.a_fast) * d_raw,
                           self.a_slow * sD + (1 - self.a_slow) * d_raw)
 
+            # (9) critical-band aggregation.  Power-weighted so the band follows what is
+            # audible in it; bands are smoothed with the same asymmetric rule and the
+            # per-bin estimate is mixed back in (band_mix) to preserve within-band
+            # contrast.  A band with no power keeps its previous value.
+            if self.band_agg:
+                pw = pLL + pRR
+                bp = np.bincount(self.band_idx, weights=pw, minlength=self.nbands)
+                bd = np.bincount(self.band_idx, weights=pw * d_raw, minlength=self.nbands)
+                valid = bp > 1e-18
+                means = np.where(valid, bd / (bp + eps), 0.0)
+                upd = np.where(means < sDBand,
+                               self.a_fast * sDBand + (1 - self.a_fast) * means,
+                               self.a_slow * sDBand + (1 - self.a_slow) * means)
+                sDBand = np.where(valid, upd, sDBand)
+                bandD = sDBand[self.band_idx]
+                d_sm = bandD + self.band_mix * (sD - bandD)
+            else:
+                d_sm = sD
+
             # onset gate: broadband flux -> hold the mask down (transients stay front)
             pw = float(np.sum(ell + err))
             ratio = pw / (self.pow_slow + eps)
@@ -382,7 +436,7 @@ class KernelV2:
                 gate = 0.15
                 self.onset_hold -= 1
 
-            D = np.clip(sD * gate * self.strength, 0, 1)           # (7) strength scales D
+            D = np.clip(d_sm * gate * self.strength, 0, 1)         # (7) strength scales D
             gd = np.sqrt(1 - D)                                    # (2) power masks
             Dsend = D * self.spread
             Dfront = D * (1 - self.spread)
@@ -407,6 +461,9 @@ class KernelV2:
             spec[CH_L] = gd * (alpha * m + sd) + gfront * self.ph_front[0] * A
             spec[CH_R] = gd * (alpha * m - sd) + gfront * self.ph_front[1] * B
             spec[CH_C] = gd * gamma * m
+
+            if self.probe:
+                self.probe_send.append(20 * np.log10(np.maximum(gsend, 1e-6)))
 
             al, ar = gsend * A, gsend * B
             spec[CH_LS] = self.g_surround * self.shapeS * self.ph[CH_LS] * al
@@ -856,11 +913,11 @@ def measure_song(kernels, sr=SR, channels=6, dur=8.0):
     return out
 
 
-def measure_transient(kernels, sr=SR, channels=6):
-    """Click + diffuse bed.  A good upmixer keeps the *attack* out of the surrounds:
-    attack/tail ratio below 1 means the transient was not spread to the rear."""
-    rng = np.random.default_rng(3)
-    t = np.arange(int(sr * 6.0)) / sr
+def click_bed(sr=SR, dur=6.0, seed=3):
+    """A dry click train over a decaying, partly decorrelated bed: the test signal for
+    both the transient metric and the mask-jitter metric."""
+    rng = np.random.default_rng(seed)
+    t = np.arange(int(sr * dur)) / sr
     k = np.arange(int(sr * 0.002))
     burst = np.exp(-k / (sr * 0.0003))
     clicks_ = np.zeros(len(t))
@@ -882,8 +939,49 @@ def measure_transient(kernels, sr=SR, channels=6):
         m = seg.stop - seg.start
         tailL[seg] += 0.12 * (0.7 * a[:m] + 0.3 * c[:m])
         tailR[seg] += 0.12 * (0.7 * c[:m] + 0.3 * a[:m])
-    L = 0.4 * clicks_ + tailL
-    R = 0.4 * clicks_ + tailR
+    return 0.4 * clicks_ + tailL, 0.4 * clicks_ + tailR, onsets
+
+
+def mask_jitter(send_db, sr, n, lo=500.0, hi=10000.0, floor_db=-35.0):
+    """Per-bin send-gain jitter inside a critical band, in dB: for every 1/3-octave band
+    take the gain of each bin relative to the band's own mean, then average the temporal
+    std over bins.  It is the spectral comb that changes every frame — the "shh" in
+    sibilants and cymbals, and the reason a per-bin mask sounds cheap.  Lower = smoother.
+    Bands whose send is below `floor_db` (nothing being sent) are skipped."""
+    f = np.arange(n // 2 + 1) * (sr / n)
+    bidx = band_index(n, sr)
+    sel = (f >= lo) & (f <= hi)
+    b, X = bidx[sel], np.asarray(send_db)[:, sel]
+    vals = []
+    for band in np.unique(b):
+        m = b == band
+        if m.sum() < 2:
+            continue
+        sub = X[:, m]
+        if float(sub.mean()) < floor_db:
+            continue
+        vals.append(float(np.mean(np.std(sub - sub.mean(axis=1, keepdims=True), axis=0))))
+    return float(np.mean(vals)) if vals else float("nan")
+
+
+def measure_mask_jitter(kernels, sr=SR, channels=12, n=2048, dur=4.0):
+    """Run each probe-enabled kernel over two signals and report the send-gain jitter."""
+    Lb, Rb, _ = click_bed(sr, dur)
+    Ls, Rs = song(sr, dur)
+    out = {}
+    for k in kernels:
+        vals = []
+        for L, R in ((Lb, Rb), (Ls, Rs)):
+            k.run(L, R)
+            vals.append(mask_jitter(k.probe_send, sr, n) if k.probe_send else float("nan"))
+        out[k.name] = tuple(vals)
+    return out
+
+
+def measure_transient(kernels, sr=SR, channels=6):
+    """Click + diffuse bed.  A good upmixer keeps the *attack* out of the surrounds:
+    attack/tail ratio below 1 means the transient was not spread to the rear."""
+    L, R, onsets = click_bed(sr, 6.0)
     out = {}
     for kk in kernels:
         y = kk.run(L, R)
@@ -1075,6 +1173,15 @@ def main():
         print("\n-- click train + diffuse bed (attack/tail energy in the surrounds) --")
         for name, (r,) in measure_transient([v1, v2], sr, channels).items():
             print(f"   {name:16s} surround attack/tail {10*math.log10(max(r,1e-12)):+6.1f} dB")
+        print("\n-- surround-send mask jitter (per-bin gain wobble inside a critical band) --")
+        pv1 = KernelV1(channels=channels, probe=True)
+        pbin = KernelV2(channels=channels, auto_level=False, band_agg=False, probe=True)
+        pbin.name = "v2, per-bin mask"
+        pband = KernelV2(channels=channels, auto_level=False, band_agg=True, probe=True)
+        pband.name = "v2, band-aggregated"
+        probes = [pv1, pbin, pband]
+        for name, (jb, js) in measure_mask_jitter(probes, sr, channels).items():
+            print(f"   {name:20s} click+bed {jb:5.2f} dB   song {js:5.2f} dB")
         print("\n-- synthetic song: front-stage timbre + binaural width --")
         for name, (dev, ic, ric, bdev) in measure_song([v1, v2], sr, channels,
                                                        dur=4.0 if args.quick else 8.0).items():

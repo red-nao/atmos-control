@@ -19,10 +19,11 @@
 //
 // `.natural` — the default. Power-exact masks, an energy-correct centre law, a
 //   diffuseness estimator using level similarity as well as coherence, asymmetric
-//   (transient-preserving) smoothing, bass management on the sends, and an
-//   Auro-Matic-style reflection/height layer built in the time domain. Every choice is
-//   documented with its measurement in docs/UPMIX-QUALITY.md, and
-//   tools/upmix-lab/upmix_lab.py reproduces the numbers offline on any machine.
+//   (transient-preserving) smoothing, the decision aggregated over 1/3-octave critical
+//   bands, bass management on the sends, and an Auro-Matic-style reflection/height layer
+//   built in the time domain. Every choice is documented with its measurement in
+//   docs/UPMIX-QUALITY.md, and tools/upmix-lab/upmix_lab.py reproduces the numbers
+//   offline on any machine.
 //
 // RT contract: every buffer and FFT setup is allocated in init and freed in deinit;
 // process() allocates nothing, takes no locks and calls no Swift runtime entry points
@@ -119,6 +120,18 @@ final class STFTUpmixer {
 
     // Natural-kernel state
     private let sD: UnsafeMutablePointer<Float>            // half+1 smoothed diffuseness
+    // Critical-band aggregation (see docs/UPMIX-QUALITY.md §3.4). A per-bin decision
+    // flutters from frame to frame on broadband transients — sibilants, cymbals — and
+    // that flutter is heard as a "shh-shh" haze: the send gain becomes a comb that
+    // changes shape every 10 ms. The decision is therefore taken per 1/3-octave band and
+    // spread back over the bins, with `bandMix` of the (already smoothed) per-bin
+    // estimate kept so that one very direct bin inside an ambient band is not swallowed.
+    private let bandCount: Int
+    private let binBand: UnsafeMutablePointer<Int>         // half+1 → band index
+    private let bandPow: UnsafeMutablePointer<Float>       // bandCount, cleared each frame
+    private let bandDRaw: UnsafeMutablePointer<Float>      // bandCount, cleared each frame
+    private let sDBand: UnsafeMutablePointer<Float>        // bandCount smoothed band value
+    private let bandMix: Float = 0.25
     private let coherenceBias: Float                       // 1/L of the coherence estimator
     private let biasInv: Float
     private let alphaSlow: Float                           // mask closing (reverb tails)
@@ -198,6 +211,22 @@ final class STFTUpmixer {
             return pp
         }
 
+        // 1/3-octave band edges from 63 Hz: band = floor(3·log2(f/63)). Bins below 63 Hz
+        // collapse into band 0. The same formula lives in tools/upmix-lab/upmix_lab.py
+        // (`band_index`) — keep the two in step, the lab is how this is measured.
+        func bandIndex(_ frequency: Double) -> Int {
+            let f = frequency < 1 ? 1 : frequency
+            let b = Int(floor(3 * log2(f / 63.0)))
+            return b < 0 ? 0 : b
+        }
+        var lastBand = 0
+        let binHz = self.sampleRate / Double(N)
+        for k in 0...H {
+            let b = bandIndex(Double(k) * binHz)
+            if b > lastBand { lastBand = b }
+        }
+        bandCount = lastBand + 1
+
         win = alloc(N)
         heightW = alloc(H + 1)
         lfeW = alloc(H + 1)
@@ -224,6 +253,11 @@ final class STFTUpmixer {
         frontCosR = alloc(H + 1)
         frontSinR = alloc(H + 1)
         sD = alloc(H + 1)
+        binBand = UnsafeMutablePointer<Int>.allocate(capacity: max(H + 1, 1))
+        binBand.initialize(repeating: 0, count: max(H + 1, 1))
+        bandPow = alloc(bandCount)
+        bandDRaw = alloc(bandCount)
+        sDBand = alloc(bandCount)
 
         // The reflection stage is a 7.1.4 feature. In 5.1 the surrounds are fed by the
         // ambience extraction alone, which measures clean (no hard-pan leakage, no bass).
@@ -275,6 +309,7 @@ final class STFTUpmixer {
         // must not detach from the front), then an HF roll-off for the height layer; both
         // normalized to unit power gain on white noise.
         let df = self.sampleRate / Double(N)
+        for k in 0...H { binBand[k] = bandIndex(Double(k) * df) }
         let hpHz = 150.0
         var sumS = 0.0, sumH = 0.0
         for k in 0...H {
@@ -350,6 +385,7 @@ final class STFTUpmixer {
         freePlanes(frontPhi, 6)
         frontCosL.deallocate(); frontSinL.deallocate()
         frontCosR.deallocate(); frontSinR.deallocate(); sD.deallocate()
+        binBand.deallocate(); bandPow.deallocate(); bandDRaw.deallocate(); sDBand.deallocate()
         freePlanes(reflDelay, max(reflCount, 1))
         reflW.deallocate(); reflTau.deallocate()
         reflSrcCh.deallocate(); reflDestCh.deallocate()
@@ -615,13 +651,39 @@ final class STFTUpmixer {
             memset(outRe[chRtr], 0, H * 4); memset(outIm[chRtr], 0, H * 4)
         }
 
+        // Pass 1: cross-spectra and the per-bin diffuseness, accumulated into bands.
+        memset(bandPow, 0, bandCount * 4)
+        memset(bandDRaw, 0, bandCount * 4)
         var framePow: Float = 0
         var k = 1
         while k < H {
             let lr = aRe[k], li = aIm[k]
             let rr = bRe[k], ri = bIm[k]
             framePow += lr * lr + li * li + rr * rr + ri * ri
-            naturalBin(k, lr, li, rr, ri, a, ia, gate, strength, spread, shpS, shpH, twelve)
+            naturalAnalyzeBin(k, lr, li, rr, ri, a, ia)
+            k += 1
+        }
+
+        // Aggregate and smooth per band. A band with no power this frame (a gap, or a
+        // band the material never excites) keeps its previous value.
+        var b = 0
+        while b < bandCount {
+            let p = bandPow[b]
+            if p > 1e-20 {
+                let mean = bandDRaw[b] / p
+                let prev = sDBand[b]
+                sDBand[b] = mean < prev ? (alphaFast * prev + (1 - alphaFast) * mean)
+                                        : (alphaSlow * prev + (1 - alphaSlow) * mean)
+            }
+            b += 1
+        }
+
+        // Pass 2: render. The per-bin spectra are still in aRe/aIm/bRe/bIm and the
+        // smoothed cross-spectrum is in pLL/pRR/pLRr, so the analysis does not have to be
+        // stored twice.
+        k = 1
+        while k < H {
+            naturalRenderBin(k, gate, strength, spread, shpS, shpH, twelve)
             k += 1
         }
 
@@ -640,14 +702,13 @@ final class STFTUpmixer {
         synthesize()
     }
 
-    /// One bin of the natural kernel. Everything here is power-exact: the direct mask,
-    /// the front-ambience mask and the send mask sum to one in power, and the centre law
-    /// is the constant-power three-speaker law, so no position or mask value dips.
+    /// Pass 1 of the natural kernel: cross-spectrum smoothing plus the per-bin
+    /// diffuseness estimate, accumulated into the critical bands. Nothing is written to
+    /// the output spectra here — the band decision has to be complete before any bin can
+    /// be rendered.
     @inline(__always)
-    private func naturalBin(_ k: Int, _ lRe: Float, _ lIm: Float, _ rRe: Float, _ rIm: Float,
-                            _ a: Float, _ ia: Float, _ gate: Float, _ strength: Float,
-                            _ spread: Float, _ shpS: UnsafePointer<Float>,
-                            _ shpH: UnsafePointer<Float>, _ twelve: Bool) {
+    private func naturalAnalyzeBin(_ k: Int, _ lRe: Float, _ lIm: Float,
+                                   _ rRe: Float, _ rIm: Float, _ a: Float, _ ia: Float) {
         let eps: Float = 1e-20
 
         let ell = lRe * lRe + lIm * lIm
@@ -675,11 +736,37 @@ final class STFTUpmixer {
         // Asymmetric smoothing: open fast (transients and entrances stay direct), close
         // slowly (a reverb tail is not yanked back into the front between frames).
         let dPrev = sD[k]
-        let d = dRaw < dPrev ? (alphaFast * dPrev + (1 - alphaFast) * dRaw)
+        sD[k] = dRaw < dPrev ? (alphaFast * dPrev + (1 - alphaFast) * dRaw)
                              : (alphaSlow * dPrev + (1 - alphaSlow) * dRaw)
-        sD[k] = d
 
-        var D = d * gate * strength
+        // Power-weighted band accumulation: the band decision follows what is audible in
+        // the band, not the bin count.
+        let weight = cll + crr
+        let b = binBand[k]
+        bandPow[b] += weight
+        bandDRaw[b] += weight * dRaw
+    }
+
+    /// Pass 2: one bin of the natural kernel. Everything here is power-exact: the direct
+    /// mask, the front-ambience mask and the send mask sum to one in power, and the
+    /// centre law is the constant-power three-speaker law, so no position or mask value
+    /// dips.
+    @inline(__always)
+    private func naturalRenderBin(_ k: Int, _ gate: Float, _ strength: Float,
+                                  _ spread: Float, _ shpS: UnsafePointer<Float>,
+                                  _ shpH: UnsafePointer<Float>, _ twelve: Bool) {
+        let eps: Float = 1e-20
+        let lRe = aRe[k], lIm = aIm[k]
+        let rRe = bRe[k], rIm = bIm[k]
+        let cll = pLL[k], crr = pRR[k], cr = pLRr[k]
+
+        // Critically-aggregated decision, plus a quarter of the (already smoothed)
+        // per-bin estimate so a single very direct bin inside an ambient band is not
+        // swallowed whole.
+        let bandD = sDBand[binBand[k]]
+        var D = bandD + bandMix * (sD[k] - bandD)
+        if D < 0 { D = 0 } else if D > 1 { D = 1 }
+        D = D * gate * strength
         if D < 0 { D = 0 } else if D > 1 { D = 1 }
 
         let gd = sqrtf(1 - D)                 // direct / primary mask
