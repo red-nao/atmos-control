@@ -2,41 +2,41 @@
    (auto-level disabled in the measurement kernels)
 
 -- level response across the image (steady tone, 17 positions) --
-   v1 (current)     -2.88 .. -0.00 dB  (spread 2.88 dB)
-   v2 (proposed)    -0.00 .. -0.00 dB  (spread 0.00 dB)
+   v1 (old kernel)  -2.88 .. -0.00 dB  (spread 2.88 dB)
+   v2 (shipped)     -0.00 .. -0.00 dB  (spread 0.00 dB)
    v2+multires [P1-2 x] -0.00 .. -0.00 dB  (spread 0.00 dB)
 
 -- centre source --
-   v1 (current)     level -0.00 dB   centre share   +0.0 dB
-   v2 (proposed)    level -0.00 dB   centre share   +0.0 dB
+   v1 (old kernel)  level -0.00 dB   centre share   +0.0 dB
+   v2 (shipped)     level -0.00 dB   centre share   +0.0 dB
    v2+multires [P1-2 x] level -0.00 dB   centre share   +0.0 dB
 
 -- 60 Hz centre bass (surround share; bass must stay in the front) --
-   v1 (current)     <120 Hz energy in the surrounds/height, vs input    -0.8 dB
-   v2 (proposed)    <120 Hz energy in the surrounds/height, vs input   -21.3 dB
+   v1 (old kernel)  <120 Hz energy in the surrounds/height, vs input    -0.8 dB
+   v2 (shipped)     <120 Hz energy in the surrounds/height, vs input   -21.3 dB
    v2+multires [P1-2 x] <120 Hz energy in the surrounds/height, vs input   -20.7 dB
 
 -- hard-panned coherent tone (must stay in the front) --
-   v1 (current)     surround   +0.0 dB   front -120.0 dB   L -120.0 dB
-   v2 (proposed)    surround -120.0 dB   front   +0.0 dB   L   -0.0 dB
+   v1 (old kernel)  surround   +0.0 dB   front -120.0 dB   L -120.0 dB
+   v2 (shipped)     surround -120.0 dB   front   +0.0 dB   L   -0.0 dB
    v2+multires [P1-2 x] surround -120.0 dB   front   +0.0 dB   L   -0.0 dB
 
 -- fully decorrelated input (ambience must go wide, not away) --
-   v1 (current)     surround share   -0.4 dB   front/rear corr 0.043   Ls/Rs corr 0.002   IACC 0.046
-   v2 (proposed)    surround share   -2.8 dB   front/rear corr 0.017   Ls/Rs corr 0.002   IACC 0.085
+   v1 (old kernel)  surround share   -0.4 dB   front/rear corr 0.043   Ls/Rs corr 0.002   IACC 0.046
+   v2 (shipped)     surround share   -2.8 dB   front/rear corr 0.017   Ls/Rs corr 0.002   IACC 0.085
    v2+multires [P1-2 x] surround share   -2.8 dB   front/rear corr 0.017   Ls/Rs corr 0.002   IACC 0.085
 
 -- click train + diffuse bed (attack/tail energy in the surrounds) --
-   v1 (current)             surround attack/tail   -4.8 dB   no gate
+   v1 (old kernel)          surround attack/tail   -4.8 dB   no gate
    v2, mask only (no gate)  surround attack/tail   -1.0 dB   no gate
-   v2 (proposed)            surround attack/tail   -8.4 dB   gate  6.8 ms /  9.3 dB, closed 15.7 %
+   v2 (shipped)             surround attack/tail   -8.4 dB   gate  6.8 ms /  9.3 dB, closed 15.7 %
    v2+multires [P1-2 x]     surround attack/tail   -2.4 dB   gate  6.8 ms /  9.3 dB, closed 12.5 %
 
 -- transient sensitivity: send attack leak vs click level above the bed --
    click level                 -15 dB     -10 dB      -5 dB      +0 dB   false triggers
-   v1 (current)                 -4.4       -4.4       -4.6       -5.0      gate closed on  0.0 % of frames
+   v1 (old kernel)              -4.4       -4.4       -4.6       -5.0      gate closed on  0.0 % of frames
    v2, mask only (no gate)      -1.4       -1.4       -1.5       -1.7      gate closed on  0.0 % of frames
-   v2 (proposed)               -11.7      -11.7      -11.4      -10.5      gate closed on  0.0 % of frames
+   v2 (shipped)                -11.7      -11.7      -11.4      -10.5      gate closed on  0.0 % of frames
    v2+multires [P1-2 x]         -6.3       -6.3       -5.2       -4.6      gate closed on  0.0 % of frames
    v2 + short flux 2.0x         -6.2       -6.3       -5.0       -4.5      gate closed on  0.0 % of frames
    v2 + long+short AND          -6.3       -6.3       -5.2       -4.6      gate closed on  0.0 % of frames
@@ -45,7 +45,7 @@
    v2 + contrast 3.0x           -2.8       -4.0       -5.1       -5.0      gate closed on  0.0 % of frames
 
 -- surround-send mask jitter (per-bin gain wobble inside a critical band) --
-   v1 (current)         click+bed  1.43 dB   song  2.82 dB
+   v1 (old kernel)      click+bed  1.43 dB   song  2.82 dB
    v2, per-bin mask     click+bed  0.89 dB   song  4.05 dB
    v2, band-aggregated  click+bed  0.21 dB   song  0.68 dB
    v2+multires [P1-2 x] click+bed  0.21 dB   song  0.71 dB
@@ -54,11 +54,11 @@
    v2, band-aggregated  attack/tail   -8.4 dB   gate  6.8 ms /  9.3 dB   diffuse surround   -2.8 dB   IACC 0.085
 
 -- synthetic song: front-stage timbre + binaural width --
-   v1 (current)     front L+R deviation  8.88 dB   IACC 0.874 (stereo ref 0.923)   eardrum deviation  4.52 dB
-   v2 (proposed)    front L+R deviation  1.57 dB   IACC 0.905 (stereo ref 0.923)   eardrum deviation  2.01 dB
+   v1 (old kernel)  front L+R deviation  8.88 dB   IACC 0.874 (stereo ref 0.923)   eardrum deviation  4.52 dB
+   v2 (shipped)     front L+R deviation  1.57 dB   IACC 0.905 (stereo ref 0.923)   eardrum deviation  2.01 dB
    v2+multires [P1-2 x] front L+R deviation  1.57 dB   IACC 0.906 (stereo ref 0.923)   eardrum deviation  2.02 dB
 
 -- passthrough null (strength = 0) --
-   v2 (proposed)    max |out - in| = 2.220e-16
+   v2 (shipped)     max |out - in| = 2.220e-16
    v2+multires [P1-2 x] max |out - in| = 2.220e-16
 

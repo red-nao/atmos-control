@@ -16,7 +16,7 @@ Spatialize Stereo・Sonos の TV Audio Swap と同レベルに持っていくに
 いずれも数十行の修正で消えます。さらに Auro-Matic がやっている
 「反射レイヤー」 (下の層の遅延コピー＋高域を軽く落とす) を足すことで、高度方向の natural nature が出ます。
 
-| # | 症状 | 現行 (Classic) | 新カーネル (Natural) | 修正の内容 |
+| # | 症状 | 旧カーネル (Classic) | 現行カーネル | 修正の内容 |
 |---|------|---------------|---------------------|-----------|
 | 1 | 中央付近が沈む | パン掃引で **2.88 dB の落ち込み** | **0.00 dB (平坦)** | 中心則をエネルギー保存形に (`γ = √(2(2c−c²))`) |
 | 2 | ハードパン音が後ろへ飛ぶ | 定位 **100 % がサラウンド** (前 −120 dB) | サラウンド −10.3 dB / 前 −0.4 dB | アンビエンス判定に「L/R のレベルが同程度」条件を追加 |
@@ -33,8 +33,8 @@ Spatialize Stereo・Sonos の TV Audio Swap と同レベルに持っていくに
 **やることは 3 段階です:**
 
 - **P0 (完了・同梱済み)** — 上記 1〜7 + `strength` / `spread` / `transients` / `reflections` /
-  `bass management` / `auto level` の各パラメータ。`UpmixConfig.quality = .natural` が既定になり、
-  UI から Classic / Natural を即時 A/B できます。
+  `bass management` / `auto level` の各パラメータ。カーネルは 1 本だけになりました
+  (測定の役目を終えた Classic はコード・UI とも削除。以降のカーネル = この現行カーネルです)。
 - **P1 (次の 1〜2 週間)** — 帯域集約 (P1-1・完了 §3.4) とマルチレゾリューション
   (P1-2・**測って不採用** §3.5)、センターの spread、レンダラ側の調整
   (reverb blend / AmbienceBed の比較)、実測でのバランス合わせ (§4)。
@@ -44,8 +44,9 @@ Spatialize Stereo・Sonos の TV Audio Swap と同レベルに持っていくに
 
 ## 1. 現状の診断 (実測)
 
-`tools/upmix-lab/upmix_lab.py` は Swift カーネルの忠実な NumPy 移植 (`KernelV1`) と、提案カーネル
-(`KernelV2`)、測定スイート、簡易バイノーラル・モニタ、聴き比べ用 WAV 出力を持ちます。
+`tools/upmix-lab/upmix_lab.py` は現行カーネルの NumPy モデル (`KernelV2`) と、削除した旧カーネルの
+モデル (`KernelV1` — すべての before/after の基準なので測定用に残しています)、測定スイート、
+簡易バイノーラル・モニタ、聴き比べ用 WAV 出力を持ちます。
 再現は:
 
 ```bash
@@ -60,8 +61,8 @@ python3 tools/upmix-lab/upmix_lab.py --wav --layout 714     # out/ に聴き比�
 
 ```
 pan position ->   -1.00 -0.88 -0.75 -0.62 -0.50 -0.38 -0.25 -0.12 +0.00 +0.12 +0.25 +0.38 +0.50 +0.62 +0.75 +0.88 +1.00
-v1 (current)      -0.02 -0.10 -0.45 -1.05 -1.87 -2.67 -2.88 -1.92 -0.00 -1.92 -2.88 -2.67 -1.87 -1.05 -0.45 -0.10 -0.01
-v2 (proposed)     -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00
+v1 (old kernel)   -0.02 -0.10 -0.45 -1.05 -1.87 -2.67 -2.88 -1.92 -0.00 -1.92 -2.88 -2.67 -1.87 -1.05 -0.45 -0.10 -0.01
+v2 (shipped)      -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00
 ```
 
 中央のすぐ脇 (−0.25〜−0.38) で **2.7〜2.9 dB** 沈みます。しかも `c` (センター引き抜き量) は
@@ -84,8 +85,8 @@ v2 (proposed)     -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0.00 -0
 
 ```
               surround      front          L
-v1 (current)    +0.0 dB   -120.0 dB   -120.0 dB     ← 100 % 後ろへ
-v2 (proposed)  -10.3 dB     -0.4 dB     -0.4 dB     ← 前の定位を保つ
+v1 (old kernel)  +0.0 dB   -120.0 dB   -120.0 dB     ← 100 % 後ろへ
+v2 (shipped)    -10.3 dB     -0.4 dB     -0.4 dB     ← 前の定位を保つ
 ```
 
 低域 (60 Hz 中心、デコリレート済み) とトランジェント:
@@ -152,7 +153,7 @@ synthetic song: front L+R deviation 8.88 dB → 1.57 dB   (7.1.4)
 
 ```
                         bed       binaural   front pair
-v1 (current)          -0.11 dB   -0.42 dB   -6.93 dB
+v1 (old kernel)       -0.11 dB   -0.42 dB   -6.93 dB
 v2 (auto level off)   +0.38 dB   -0.05 dB   -3.55 dB
 v2 (auto level on)    +0.16 dB   -0.29 dB   -3.77 dB
 ```
@@ -184,8 +185,8 @@ v2 (auto level on)    +0.16 dB   -0.29 dB   -3.77 dB
 - すべてのアプリで動作する代わりに、素材によって**音色とボーカルの明瞭度が変わる**という代償がある。
 
 → **借りるもの**: 遅延 (1 ウィンドウ) とレイテンシの割り切り、ヘッドトラッキングとの併用時の注意。
-→ **逆に**: このプロジェクトの `Classic` は概ねこの方向の実装 (1024/2048, MPEG_5_1_A 相当) なので、
-「Apple と同程度」は P0 で達成済み、「Auro-Matic 以上」を狙うなら反射レイヤーが必須。
+→ **逆に**: 削除した旧 `Classic` カーネルは概ねこの方向の実装 (1024/2048, MPEG_5_1_A 相当) でした。
+「Apple と同程度」は P0 で達成済み、「Auro-Matic 以上」を狙うなら反射レイヤーが必須です。
 
 ### 2.3 Sonos TV Audio Swap (Soundbar + Ace)
 
@@ -201,10 +202,10 @@ v2 (auto level on)    +0.16 dB   -0.29 dB   -3.77 dB
 
 ## 3. 改善案 (P0: 実装済み)
 
-実装は `Sources/SpatialEngine/STFTUpmixer.swift` に 2 カーネル共存の形で入れてあります。
-`UpmixConfig.quality` で**即時に**切り替えられるので、聴き比べは 1 クリックです。
+実装は `Sources/SpatialEngine/STFTUpmixer.swift` に 1 カーネルとして入っています
+(旧カーネルとの A/B はラボの `--compare` が `v1 (old kernel)` として再現します)。
 
-### 3.1 カーネルの式 (Natural)
+### 3.1 カーネルの式
 
 ビンごとに:
 
@@ -255,7 +256,6 @@ Vhl' = gSend·HP150·LP7k(L) + 反射レイヤー
 
 | パラメータ | 範囲 | 既定 | 意味 |
 |-----------|------|------|------|
-| **Kernel** | Classic / Natural | **Natural** | カーネル選択 (即時 A/B) |
 | **Strength** | 0…1 | 1.0 | 効果の総量 (0 = 完全バイパス) |
 | **Ambience spread** | 0…1 | 0.6 | アンビエンスのうち後方/上方へ回す割合 |
 | **Transient preservation** | 0…1 | 1.0 | オンセットでゲートを閉じる深さ (1.0 = −16.5 dB、0 = ゲートなし) |
@@ -281,10 +281,10 @@ Vhl' = gSend·HP150·LP7k(L) + 反射レイヤー
 
 ```
                           クリック列+拡散ベッド   合成楽曲
-v1 (current)                   1.43 dB            2.82 dB
+v1 (old kernel)                1.43 dB            2.82 dB
 v2, per-bin mask               0.89 dB            4.05 dB
 v2, band-aggregated            0.21 dB            0.68 dB     ← 約 1/4〜1/7
-v2+multires (P1-2, ×)          0.21 dB            0.71 dB
+v2+multires [P1-2 x]           0.21 dB            0.71 dB
 ```
 
 副作用も小さい (同じ条件で測り直したもの):
@@ -299,7 +299,7 @@ v2, band-aggregated         −7.1 dB      6.8 ms        −2.2 dB       0.101
 聴感上は「アタックの粒立ち」を保ったまま、高域の粗さだけが減る方向に働きます。
 
 ※ 実装上の注意: 帯域値を確定してからビンを描画する必要があるため、
-`processFrameNatural()` は **①コヒーレンス/拡散度の集計 → ②帯域の平滑 → ③描画** の 2 パス構成です。
+`processFrame()` は **①コヒーレンス/拡散度の集計 → ②帯域の平滑 → ③描画** の 2 パス構成です。
 入力スペクトル (`aRe/aIm` など) はそのまま残っているので、メモリは増えていません (追加は
 帯域数ぶんの 3 本の Float 配列と bin→band の Int テーブルだけ)。
 
@@ -330,14 +330,15 @@ P1-2 は「2 つ目の短い窓 (N/2 = 21 ms) を足して、アタックの判�
 ```
                         クリック漏れ (dB, 低いほど良い)        誤発火
                         −15 dB   −10 dB   −5 dB   +0 dB
-v1 (Classic)             −4.4     −4.4     −4.6    −5.0       0.0 %
-v2, マスクのみ             −1.3     −1.3     −1.4    −1.6       0.0 %
-v2, いまの検出器 (1.6×)    −9.4     −9.4     −9.3    −8.7       0.0 %   ← 出荷済み
-v2 + 短窓フラックス 2.0×   −5.5     −5.6     −4.6    −4.1       0.0 %
-v2 + 長短 AND 1.6/2.0×    −5.6     −5.6     −4.7    −4.2       0.0 %
-v2 + 長窓 + マスク min     −9.4     −9.4     −9.3    −8.7       0.0 %   ← min は無影響
-v2 + コントラスト 1.5×     −6.8     −5.8     −4.9    −4.6       0.0 %   ← FFT 追加なし
-v2 + コントラスト 3.0×     −2.5     −3.6     −4.6    −4.6       0.0 %
+v1 (old kernel)          −4.4     −4.4     −4.6    −5.0       0.0 %
+v2, mask only (no gate)  −1.3     −1.3     −1.4    −1.6       0.0 %
+v2 (shipped)             −9.4     −9.4     −9.3    −8.7       0.0 %   ← 出荷済み (1.6×)
+v2+multires [P1-2 x]     −5.6     −5.6     −4.7    −4.2       0.0 %
+v2 + short flux 2.0x     −5.5     −5.6     −4.6    −4.1       0.0 %
+v2 + long+short AND      −5.6     −5.6     −4.7    −4.2       0.0 %
+v2 + mask min only       −9.4     −9.4     −9.3    −8.7       0.0 %   ← min は無影響
+v2 + contrast 1.5x       −6.8     −5.8     −4.9    −4.6       0.0 %   ← FFT 追加なし
+v2 + contrast 3.0x       −2.5     −3.6     −4.6    −4.6       0.0 %
 ```
 
 > 誤発火 0.0 % が並んでいるのは、誤発火率を**定常なベッド**で測っているためです
@@ -347,10 +348,10 @@ v2 + コントラスト 3.0×     −2.5     −3.6     −4.6    −4.6       0
 クリック列 + 拡散ベッドでのアタック/テールとゲート反応:
 
 ```
-v1 (Classic)            −4.8 dB   ゲートなし
-v2, マスクのみ           −0.9 dB   ゲートなし
-v2, いまの検出器         −7.1 dB   6.8 ms / 9.3 dB のダック、閉じているのは 15.7 % のフレーム
-v2 + マルチレゾ (P1-2)   −2.2 dB   6.8 ms / 9.3 dB
+v1 (old kernel)          −4.8 dB   ゲートなし
+v2, mask only (no gate)  −0.9 dB   ゲートなし
+v2 (shipped)             −7.1 dB   6.8 ms / 9.3 dB のダック、閉じているのは 15.7 % のフレーム
+v2+multires [P1-2 x]     −2.2 dB   6.8 ms / 9.3 dB
 ```
 
 **なぜ短い窓が負けるのか** — ここが P1-2 の核心なので、測って分かったことを書きます。
@@ -392,7 +393,7 @@ v2 + マルチレゾ (P1-2)   −2.2 dB   6.8 ms / 9.3 dB
 
 **副産物 2: Transient スライダーの連続化 (実装済み)** — 上の表のとおり、アタック漏れを
 決めているのは**マスクではなくゲート**です (マスクは「ベッドのアンビエンスを後ろに回す」
-役割で、オンセットでは −0.9 dB と Classic より悪い — 送る量が多いので漏れる量も増える。
+役割で、オンセットでは −0.9 dB と旧カーネルより悪い — 送る量が多いので漏れる量も増える。
 それをゲートが抑える、という分担)。そこでゲートの **ダック量をスライダーに比例させました**。
 出荷時は「`transients > 0` なら常に 0.15 倍」という二値でしたが、
 
@@ -433,7 +434,7 @@ transients      0.00    0.25    0.50    0.75    1.00
    `SourceMode = AmbienceBed` (ベッドを内部デコーダに任せる) と現行のポイントソース方式を
    バイノーラルで比較。特に背面 (Rls/Rrs) の定位はレンダラ依存です。
    また現在 ReverbBlend が全バスに 1 % かかっており、反射レイヤーと二重になります。
-   Natural では送り先バスの ReverbBlend を 0 にする選択肢を検討。
+   送り先バスの ReverbBlend を 0 にする選択肢を検討。
 5. **実測でのバランス合わせ**
    アップミックス後の各チャンネルを 1 本ずつ鳴らし、`--wav-multichannel` の出力を
    バイノーラル・モニタで聴いて、7.1.4 の 12 本の相対レベルを実測カーブに合わせる
@@ -468,8 +469,8 @@ python3 tools/upmix-lab/upmix_lab.py --compare --layout 51
 python3 tools/upmix-lab/upmix_lab.py --wav --layout 714
 #   out/song_input_stereo.wav            元のステレオ
 #   out/song_stereo_binaural_ref.wav     ±30° に置いただけのステレオ (基準)
-#   out/song_v1_714_binaural.wav         現行カーネル
-#   out/song_v2_714_binaural.wav         提案カーネル (Classic を含む両カーネルはアプリで切替)
+#   out/song_v1_714_binaural.wav         旧カーネル (Classic、削除済みの測定基準)
+#   out/song_v2_714_binaural.wav         現行カーネル
 python3 tools/upmix-lab/upmix_lab.py --wav --layout 714 --wav-multichannel   # 生の 7.1.4 ベッド
 
 # 3) 自分の曲で
@@ -484,7 +485,6 @@ python3 tools/upmix-lab/upmix_lab.py --wav --input ~/Music/test.wav --layout 714
 swift build -c release
 bash App/build-app.sh release
 ATMOS_PREVIEW=1 open -n dist/atmos-control.app
-# Full Control ▸ Upmix ▸ Advanced ▸ Kernel を Classic ↔ Natural (即時切り替え)
 # Strength 0 / 1 で on/off の音量差を確認 (auto level on)
 # Transient preservation 1.0 → 0.5 → 0.0: ドラム/拍手でアタックが前に残る量が変わる (§3.5)
 ```
@@ -495,20 +495,19 @@ ATMOS_PREVIEW=1 open -n dist/atmos-control.app
 
 | ファイル | 変更 |
 |---------|------|
-| `Sources/SpatialEngine/STFTUpmixer.swift` | Classic / Natural の 2 カーネル、反射レイヤー、auto level、`scale` 修正、帯域集約マスク (P1-1)、ゲートの深さを連続化 (P1-2) |
-| `Sources/SpatialEngine/UpmixConfig.swift` | `quality` + 7 パラメータ追加、緩いデコード (既存の保存値と互換) |
+| `Sources/SpatialEngine/STFTUpmixer.swift` | 単一カーネル。反射レイヤー、auto level、`scale` 修正、帯域集約マスク (P1-1)、ゲートの深さを連続化 (P1-2)。旧 Classic カーネルは削除 |
+| `Sources/SpatialEngine/UpmixConfig.swift` | 新パラメータ追加、緩いデコード (既存の保存値と互換)。`UpmixQuality` / `quality` は削除 |
 | `Sources/SpatialEngine/Decorrelator.swift` | `tauMax` / `segment` の上書き引数 (前方アンビエンス用の緩い位相カーブ) |
 | `Sources/AtmosControlApp/EngineController.swift` | `setUpmix(...)` 拡張 (全て即時反映) |
-| `Sources/AtmosControlApp/UpmixView.swift` | Kernel ピッカー + 新スライダー |
+| `Sources/AtmosControlApp/UpmixView.swift` | 新スライダー (Kernel ピッカーは削除) |
 | `Sources/AtmosControlApp/Ranges.swift` | 新パラメータの範囲・表示 |
 | `tools/upmix-lab/upmix_lab.py` | 測定・試作・WAV 出力 (依存: numpy のみ) |
 | `README.md` | Upmix 節の更新 |
 
 **開発時の注意 (RT スレッド)**
 
-- `process()` は**アロケーション禁止**。このため Natural カーネルの選択は
-  `enum` 比較ではなく **Bool** (`pNatural`) で行っています (`String` 列挙の比較は
-  ヒープ参照が発生し得ます)。
+- `process()` は**アロケーション禁止**。カーネル選択の Bool (`pNatural`) はカーネルが
+  1 本になった時点で削除し、RT スレッド側に列挙型の比較は残っていません。
 - 追加バッファは全て `init` で確保し `deinit` で解放。
 - パラメータは 32-bit スカラを直接読み、フレームごとに平滑化 (テアリングは聴感上無害)。
 

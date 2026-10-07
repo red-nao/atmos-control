@@ -1,9 +1,7 @@
 // AtmosControlApp/UpmixView.swift — the Upmix section of Full Control.
 //
 // Everything here except ON/OFF, Target layout and FFT size is live; those three change
-// the shape of the graph, so they rebuild it (a ~200 ms gap, §4.7). The kernel picker is
-// live as well: both kernels share one analysis engine, so Classic ↔ Natural is an
-// instant A/B — the fastest way to hear what the quality pass actually did.
+// the shape of the graph, so they rebuild it (a ~200 ms gap, §4.7).
 
 import SwiftUI
 import SpatialEngine
@@ -71,17 +69,6 @@ struct UpmixSection: View {
                 .pickerStyle(.segmented)
 
                 DisclosureGroup("Advanced") {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Picker("Kernel", selection: Binding(get: { up.quality },
-                                                            set: { controller.setUpmix(quality: $0) })) {
-                            ForEach(UpmixQuality.allCases) { Text($0.label).tag($0) }
-                        }
-                        .pickerStyle(.segmented)
-                        Text(up.quality.blurb)
-                            .font(.footnote).foregroundStyle(.secondary)
-                            .fixedSize(horizontal: false, vertical: true)
-                    }
-
                     liveSlider("Transient preservation", Param.upTransient, value: up.transients) {
                         controller.setUpmix(transients: $0)
                     }
@@ -118,7 +105,7 @@ struct UpmixSection: View {
         } header: {
             Text("Upmix")
         } footer: {
-            SectionFootnote("Splits the stereo signal into direct sound and ambience with a short-time Fourier transform, then places them on \(up.layout == .surround714 ? "twelve" : "six") virtual speakers before binaural rendering. Natural keeps the direct path untouched, bass-manages the sends and synthesises the height layer from delayed reflections; Classic is the original kernel. Turning it on or off rebuilds the audio graph, so expect a brief gap.")
+            SectionFootnote("Splits the stereo signal into direct sound and ambience with a short-time Fourier transform, then places them on \(up.layout == .surround714 ? "twelve" : "six") virtual speakers before binaural rendering. The direct path is left untouched, the sends are bass-managed and the height layer is synthesised from delayed reflections. Turning it on or off rebuilds the audio graph, so expect a brief gap.")
         }
     }
 

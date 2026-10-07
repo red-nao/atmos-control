@@ -871,14 +871,13 @@ final class EngineController {
         applyConfig()
     }
 
-    /// Continuous upmix parameters — applied live, no rebuild. `quality` is live too:
-    /// both kernels share the same buffers, so switching is an instant A/B.
+    /// Continuous upmix parameters — applied live, no rebuild.
     func setUpmix(center: Float? = nil, surroundLevel: Float? = nil, heightLevel: Float? = nil,
                   decorrelation: Float? = nil, ambientBias: Float? = nil,
                   surroundSpread: Float? = nil, lfe: LFEMode? = nil,
                   strength: Float? = nil, spread: Float? = nil, transients: Float? = nil,
                   reflectionsLevel: Float? = nil, bassManagement: Bool? = nil,
-                  autoLevel: Bool? = nil, quality: UpmixQuality? = nil) {
+                  autoLevel: Bool? = nil) {
         if let v = center { config.upmix.centerStrength = v }
         if let v = surroundLevel { config.upmix.surroundLevel = v }
         if let v = heightLevel { config.upmix.heightLevel = v }
@@ -892,7 +891,6 @@ final class EngineController {
         if let v = reflectionsLevel { config.upmix.reflectionsLevel = v }
         if let v = bassManagement { config.upmix.bassManagement = v }
         if let v = autoLevel { config.upmix.autoLevel = v }
-        if let v = quality { config.upmix.quality = v }
         engine.updateUpmix(config.upmix)
         // surroundSpread moves the virtual speakers themselves: that's a mixer parameter,
         // so push it through reconfigure (no rebuild — it lands in applySourceParams).

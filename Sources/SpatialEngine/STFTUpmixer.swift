@@ -1,33 +1,28 @@
 // SpatialEngine/STFTUpmixer.swift — 2 → 6/12 channel upmix.
 //
-// Two kernels share one analysis/synthesis engine (see UpmixConfig.quality):
+// One kernel. Power-exact masks, an energy-correct centre law, a diffuseness estimator
+// using level similarity as well as coherence, asymmetric (transient-preserving)
+// smoothing with an onset gate, the decision aggregated over 1/3-octave critical bands,
+// bass management on the sends, and an Auro-Matic-style reflection/height layer built in
+// the time domain. Every choice is documented with its measurement in
+// docs/UPMIX-QUALITY.md, and tools/upmix-lab/upmix_lab.py reproduces the numbers offline
+// on any machine.
 //
-// `.classic` — the first-generation per-bin primary/ambient extractor, behaviour
-//   unchanged since the fork. Coherence γ² says how much of a bin is phantom image
-//   (direct) versus room/reverb (ambience), β says where that image sits, the direct
-//   part is re-panned with a fitted L/C/R law and the ambience is decorrelated into the
-//   surrounds. Two defects motivated the quality pass, both measured on the bench:
-//     • the fitted centre law (C = √2·c·m with L/R = s + (1−c)·m) only preserves energy
-//       at c = 0 and c = 1. In between it dips up to 2.9 dB, and because c moves per bin
-//       and per frame the dip *modulates*: a W-shaped level curve across the stereo
-//       image, which is what "phasey / dull / pumping" sounds like;
-//     • γ² alone cannot separate "hard-panned" from "diffuse". A source panned fully to
-//       one side has low coherence by construction, so the classic kernel treats it as
-//       ambience and moves it: a hard-panned tone ends up 100 % in Ls/Rs and not at all
-//       in the front. Avendano & Jot (2002) list the missing criterion explicitly — the
-//       two channels must also have *comparable energy* to call a bin ambient.
-//
-// `.natural` — the default. Power-exact masks, an energy-correct centre law, a
-//   diffuseness estimator using level similarity as well as coherence, asymmetric
-//   (transient-preserving) smoothing, the decision aggregated over 1/3-octave critical
-//   bands, bass management on the sends, and an Auro-Matic-style reflection/height layer
-//   built in the time domain. Every choice is documented with its measurement in
-//   docs/UPMIX-QUALITY.md, and tools/upmix-lab/upmix_lab.py reproduces the numbers
-//   offline on any machine.
+// It replaced a first-generation per-bin extractor (the "Classic" kernel, since removed)
+// whose two defects motivated the rewrite, both measured on the bench:
+//   • its fitted centre law (C = √2·c·m with L/R = s + (1−c)·m) only preserves energy at
+//     c = 0 and c = 1. In between it dips up to 2.9 dB, and because c moves per bin and
+//     per frame the dip *modulates*: a W-shaped level curve across the stereo image,
+//     which is what "phasey / dull / pumping" sounds like;
+//   • γ² alone cannot separate "hard-panned" from "diffuse". A source panned fully to one
+//     side has low coherence by construction, so it was treated as ambience and moved: a
+//     hard-panned tone ended up 100 % in Ls/Rs and not at all in the front. Avendano &
+//     Jot (2002) list the missing criterion explicitly — the two channels must also have
+//     *comparable energy* to call a bin ambient.
 //
 // RT contract: every buffer and FFT setup is allocated in init and freed in deinit;
 // process() allocates nothing, takes no locks and calls no Swift runtime entry points
-// (no Array, no String, no ARC — that is why the kernel selector is a Bool, not the enum).
+// (no Array, no String, no ARC).
 
 import Accelerate
 import Foundation
@@ -37,7 +32,7 @@ import Foundation
 private let chL = 0, chR = 1, chC = 2, chLFE = 3, chLs = 4, chRs = 5
 private let chRls = 6, chRrs = 7, chVhl = 8, chVhr = 9, chLtr = 10, chRtr = 11
 
-/// Early-reflection matrix for the natural kernel (7.1.4 only). Each destination gets
+/// Early-reflection matrix (7.1.4 only). Each destination gets
 /// delayed, high-passed, HF-trimmed copies of the ground channels, weighted by physical
 /// adjacency — mostly the speaker below, less the adjacent, least the diagonal opposite.
 /// Auro-Matic describes its own height layer the same way (a slightly delayed, HF
@@ -69,10 +64,9 @@ final class STFTUpmixer {
 
     // Windows / weights
     private let win: UnsafeMutablePointer<Float>          // √Hann, fftSize
-    private let heightW: UnsafeMutablePointer<Float>      // half+1 — classic "air" send
     private let lfeW: UnsafeMutablePointer<Float>         // half+1
 
-    // Natural-kernel band shapes (half+1 each)
+    // Band shapes for the sends (half+1 each)
     private let shapeSurroundBass: UnsafeMutablePointer<Float>
     private let shapeSurroundFlat: UnsafeMutablePointer<Float>
     private let shapeHeightBass: UnsafeMutablePointer<Float>
@@ -118,7 +112,7 @@ final class STFTUpmixer {
     private let frontSinR: UnsafeMutablePointer<Float>
     private var tableDecorr: Float = -1
 
-    // Natural-kernel state
+    // Kernel state
     private let sD: UnsafeMutablePointer<Float>            // half+1 smoothed diffuseness
     // Critical-band aggregation (see docs/UPMIX-QUALITY.md §3.4). A per-bin decision
     // flutters from frame to frame on broadband transients — sibilants, cymbals — and
@@ -136,7 +130,6 @@ final class STFTUpmixer {
     private let biasInv: Float
     private let alphaSlow: Float                           // mask closing (reverb tails)
     private var alphaFast: Float                           // mask opening (transients)
-    private var pNatural = true
     private var pStrength: Float = 1
     private var pSpread: Float = 0.6
     private var pTransients: Float = 1
@@ -182,8 +175,7 @@ final class STFTUpmixer {
     private var sStrength: Float = 1
 
     private let alphaSmooth: Float          // parameter smoothing coefficient
-    private let alphaPowerClassic: Float    // classic cross-spectrum smoothing (τ = 50 ms)
-    private let alphaPower: Float           // natural cross-spectrum smoothing (τ = 120 ms)
+    private let alphaPower: Float           // cross-spectrum smoothing (τ = 120 ms)
     private let scale: Float                // FFT round-trip + WOLA normalization
 
     init?(channels: Int, fftSize: Int, sampleRate: Double, maxFrames: Int, config: UpmixConfig) {
@@ -228,7 +220,6 @@ final class STFTUpmixer {
         bandCount = lastBand + 1
 
         win = alloc(N)
-        heightW = alloc(H + 1)
         lfeW = alloc(H + 1)
         shapeSurroundBass = alloc(H + 1)
         shapeSurroundFlat = alloc(H + 1)
@@ -280,16 +271,15 @@ final class STFTUpmixer {
         // Every stored property must be set before self is usable below.
         let hopSeconds = Float(hop) / Float(self.sampleRate)
         // A short-time coherence estimate is biased upward by ~1/L for independent
-        // channels; averaging for 120 ms (instead of the classic 50 ms) plus an explicit
-        // debias keeps diffuse material out of the direct path.
-        let naturalTau: Float = 0.120
-        alphaPowerClassic = exp(-hopSeconds / 0.050)
-        alphaPower = exp(-hopSeconds / naturalTau)
+        // channels; averaging for 120 ms plus an explicit debias keeps diffuse material
+        // out of the direct path.
+        let coherenceTau: Float = 0.120
+        alphaPower = exp(-hopSeconds / coherenceTau)
         // Transient preservation maps to the mask's opening time constant: 30 ms at 0
         // (gently asymmetric) down to 5 ms at 1, where onsets also gate the sends.
         alphaFast = exp(-hopSeconds / 0.030)
         alphaSlow = exp(-hopSeconds / 0.150)
-        coherenceBias = hopSeconds / naturalTau
+        coherenceBias = hopSeconds / coherenceTau
         biasInv = 1 / max(1 - coherenceBias, 1e-3)
         alphaSmooth = exp(-hopSeconds / 0.030)      // parameter smoothing τ = 30 ms
         // vDSP real FFT: forward is 2× the DFT, inverse is N× the IDFT → 1/(2N).
@@ -303,20 +293,16 @@ final class STFTUpmixer {
             let w = 0.5 - 0.5 * cos(2 * Double.pi * Double(i) / Double(N))
             win[i] = Float(sqrt(w))
         }
-        // Classic height send: nothing below 2 kHz, full above 8 kHz.
-        // LFE: flat to 120 Hz, cosine roll-off to 180 Hz.
-        // Natural shapes: first-order high-pass at 150 Hz (bass management — the low end
-        // must not detach from the front), then an HF roll-off for the height layer; both
-        // normalized to unit power gain on white noise.
+        // LFE: flat to 120 Hz, cosine roll-off to 180 Hz. Band shapes: first-order
+        // high-pass at 150 Hz (bass management — the low end must not detach from the
+        // front), then an HF roll-off for the height layer; both normalized to unit
+        // power gain on white noise.
         let df = self.sampleRate / Double(N)
         for k in 0...H { binBand[k] = bandIndex(Double(k) * df) }
         let hpHz = 150.0
         var sumS = 0.0, sumH = 0.0
         for k in 0...H {
             let f = Double(k) * df
-            if f < 2000 { heightW[k] = 0 }
-            else if f < 8000 { heightW[k] = Float(log2(f / 2000) / 2.0) }
-            else { heightW[k] = 1 }
             if f < 120 { lfeW[k] = 1 }
             else if f < 180 { lfeW[k] = Float(0.5 + 0.5 * cos(Double.pi * (f - 120) / 60)) }
             else { lfeW[k] = 0 }
@@ -373,7 +359,7 @@ final class STFTUpmixer {
             pp.deallocate()
         }
         vDSP_destroy_fftsetup(setup)
-        win.deallocate(); heightW.deallocate(); lfeW.deallocate()
+        win.deallocate(); lfeW.deallocate()
         shapeSurroundBass.deallocate(); shapeSurroundFlat.deallocate()
         shapeHeightBass.deallocate(); shapeHeightFlat.deallocate()
         inL.deallocate(); inR.deallocate(); frame.deallocate()
@@ -400,9 +386,6 @@ final class STFTUpmixer {
         pDecorr = min(max(c.decorrelation, 0), 1)
         pAmbient = powf(10, min(max(c.ambientBias, -12), 12) / 20)
         pLFE = (c.lfeMode == .lowpass150)
-        // The kernel selector must stay a Bool inside process(): comparing the
-        // String-backed enum there would dereference heap storage on the RT thread.
-        pNatural = (c.quality == .natural)
         pStrength = min(max(c.strength, 0), 1)
         pSpread = min(max(c.spread, 0), 1)
         pTransients = min(max(c.transients, 0), 1)
@@ -449,24 +432,18 @@ final class STFTUpmixer {
         }
         outCount -= n
 
-        // Natural-kernel post-stages. Both work on the samples just emitted, so a block
-        // boundary never changes what they see (the reflection delay lines are
-        // sample-accurate). Order matters: the trim runs first, so the reflection layer
-        // is built from — and is therefore consistent with — the levelled bed, and the
-        // level invariant is measured on the ground layer alone.
-        if pNatural {
-            if pAutoLevel { levelStage(out: out, inLeft: inLeft, inRight: inRight, frames: n) }
-            if reflDests > 0 { reflectionStage(out: out, frames: n) }
-        }
+        // Post-stages. Both work on the samples just emitted, so a block boundary never
+        // changes what they see (the reflection delay lines are sample-accurate). Order
+        // matters: the trim runs first, so the reflection layer is built from — and is
+        // therefore consistent with — the levelled bed, and the level invariant is
+        // measured on the ground layer alone.
+        if pAutoLevel { levelStage(out: out, inLeft: inLeft, inRight: inRight, frames: n) }
+        if reflDests > 0 { reflectionStage(out: out, frames: n) }
     }
 
     // MARK: - One STFT frame
 
-    private func processFrame() {
-        if pNatural { processFrameNatural() } else { processFrameClassic() }
-    }
-
-    /// Analysis + synthesis scaffolding shared by both kernels.
+    /// Analysis + synthesis scaffolding.
     private func analyze() {
         let N = fftSize, H = half
         var splitA = DSPSplitComplex(realp: aRe, imagp: aIm)
@@ -504,117 +481,9 @@ final class STFTUpmixer {
         outCount += hop
     }
 
-    // MARK: - Classic kernel (behaviour unchanged)
+    // MARK: - Kernel
 
-    private func processFrameClassic() {
-        let H = half
-
-        if tableDecorr != pDecorr { rebuildPhaseTables(pDecorr) }
-        sCenter   += (1 - alphaSmooth) * (pCenter - sCenter)
-        sSurround += (1 - alphaSmooth) * (pSurroundGain - sSurround)
-        sHeight   += (1 - alphaSmooth) * (pHeightGain - sHeight)
-        sAmbient  += (1 - alphaSmooth) * (pAmbient - sAmbient)
-
-        analyze()
-
-        // Packed real FFT: index 0 carries DC in realp and Nyquist in imagp.
-        let dcL = aRe[0], nyqL = aIm[0]
-        let dcR = bRe[0], nyqR = bIm[0]
-
-        let a = alphaPowerClassic, ia = 1 - a
-        let eps: Float = 1e-20
-        let center = min(sCenter, 1.5)
-        let ambientGain = sAmbient
-        let sqrt2: Float = 1.414213562
-        let twelve = (channels == kAtmos714Channels)
-
-        var k = 1
-        while k < H {
-            let lr = aRe[k], li = aIm[k]
-            let rr = bRe[k], ri = bIm[k]
-
-            let ell = lr * lr + li * li
-            let err = rr * rr + ri * ri
-            let xr = lr * rr + li * ri          // Re(L · conj(R))
-            let xi = li * rr - lr * ri          // Im(L · conj(R))
-
-            pLL[k] = a * pLL[k] + ia * ell
-            pRR[k] = a * pRR[k] + ia * err
-            pLRr[k] = a * pLRr[k] + ia * xr
-            pLRi[k] = a * pLRi[k] + ia * xi
-
-            let cll = pLL[k], crr = pRR[k], cr = pLRr[k], ci = pLRi[k]
-            var g2 = (cr * cr + ci * ci) / (cll * crr + eps)
-            if g2 > 1 { g2 = 1 }
-            // Out-of-phase content is room, not image: push it to the ambient side.
-            if cr < 0 { g2 *= 0.25 }
-            let beta = (cll - crr) / (cll + crr + eps)
-
-            let gd = sqrtf(g2)
-            let ga = sqrtf(1 - g2) * ambientGain
-
-            // Direct part, re-panned L / C / R (constant power, energy preserving).
-            let dlr = gd * lr, dli = gd * li
-            let drr = gd * rr, dri = gd * ri
-            let mr = 0.5 * (dlr + drr), mi = 0.5 * (dli + dri)
-            let slr = dlr - mr, sli = dli - mi
-            let srr = drr - mr, sri = dri - mi
-            var c = 1 - abs(beta)
-            if c < 0 { c = 0 }
-            c = c * c * center
-            if c > 1 { c = 1 }
-            let oneMinusC = 1 - c
-
-            outRe[chL][k] = slr + oneMinusC * mr;  outIm[chL][k] = sli + oneMinusC * mi
-            outRe[chR][k] = srr + oneMinusC * mr;  outIm[chR][k] = sri + oneMinusC * mi
-            outRe[chC][k] = sqrt2 * c * mr;        outIm[chC][k] = sqrt2 * c * mi
-
-            // Ambient part, decorrelated into the surrounds (and heights in 7.1.4).
-            let alr = ga * lr, ali = ga * li
-            let arr = ga * rr, ari = ga * ri
-            let gS = sSurround
-
-            rotate(chLs, k, alr, ali, gS)
-            rotate(chRs, k, arr, ari, gS)
-
-            if twelve {
-                rotate(chRls, k, alr, ali, gS * 0.7)
-                rotate(chRrs, k, arr, ari, gS * 0.7)
-                let wh = heightW[k] * sHeight
-                if wh > 0 {
-                    rotate(chVhl, k, alr, ali, wh)
-                    rotate(chVhr, k, arr, ari, wh)
-                    rotate(chLtr, k, alr, ali, wh * 0.7)
-                    rotate(chRtr, k, arr, ari, wh * 0.7)
-                } else {
-                    outRe[chVhl][k] = 0; outIm[chVhl][k] = 0
-                    outRe[chVhr][k] = 0; outIm[chVhr][k] = 0
-                    outRe[chLtr][k] = 0; outIm[chLtr][k] = 0
-                    outRe[chRtr][k] = 0; outIm[chRtr][k] = 0
-                }
-            }
-
-            if pLFE {
-                let w = lfeW[k]
-                outRe[chLFE][k] = 0.5 * (lr + rr) * w
-                outIm[chLFE][k] = 0.5 * (li + ri) * w
-            } else {
-                outRe[chLFE][k] = 0; outIm[chLFE][k] = 0
-            }
-            k += 1
-        }
-
-        // DC and Nyquist: real-valued, no decorrelation phase (rotating them would just
-        // fold energy into the imaginary part that the packed format can't carry).
-        writeRealBin(l: dcL, r: dcR, real: true)
-        writeRealBin(l: nyqL, r: nyqR, real: false)
-
-        synthesize()
-    }
-
-    // MARK: - Natural kernel
-
-    private func processFrameNatural() {
+    private func processFrame() {
         let H = half
 
         if tableDecorr != pDecorr { rebuildPhaseTables(pDecorr) }
@@ -667,7 +536,7 @@ final class STFTUpmixer {
             let lr = aRe[k], li = aIm[k]
             let rr = bRe[k], ri = bIm[k]
             framePow += lr * lr + li * li + rr * rr + ri * ri
-            naturalAnalyzeBin(k, lr, li, rr, ri, a, ia)
+            analyzeBin(k, lr, li, rr, ri, a, ia)
             k += 1
         }
 
@@ -690,13 +559,13 @@ final class STFTUpmixer {
         // stored twice.
         k = 1
         while k < H {
-            naturalRenderBin(k, gate, strength, spread, shpS, shpH, twelve)
+            renderBin(k, gate, strength, spread, shpS, shpH, twelve)
             k += 1
         }
 
-        naturalRealBin(l: dcL, r: dcR, real: true, shpS: shpS, shpH: shpH,
+        realBin(l: dcL, r: dcR, real: true, shpS: shpS, shpH: shpH,
                        twelve: twelve, strength: strength, spread: spread)
-        naturalRealBin(l: nyqL, r: nyqR, real: false, shpS: shpS, shpH: shpH,
+        realBin(l: nyqL, r: nyqR, real: false, shpS: shpS, shpH: shpH,
                        twelve: twelve, strength: strength, spread: spread)
 
         if pTransients > 0 {
@@ -709,13 +578,13 @@ final class STFTUpmixer {
         synthesize()
     }
 
-    /// Pass 1 of the natural kernel: cross-spectrum smoothing plus the per-bin
+    /// Pass 1: cross-spectrum smoothing plus the per-bin
     /// diffuseness estimate, accumulated into the critical bands. Nothing is written to
     /// the output spectra here — the band decision has to be complete before any bin can
     /// be rendered.
     @inline(__always)
-    private func naturalAnalyzeBin(_ k: Int, _ lRe: Float, _ lIm: Float,
-                                   _ rRe: Float, _ rIm: Float, _ a: Float, _ ia: Float) {
+    private func analyzeBin(_ k: Int, _ lRe: Float, _ lIm: Float,
+                            _ rRe: Float, _ rIm: Float, _ a: Float, _ ia: Float) {
         let eps: Float = 1e-20
 
         let ell = lRe * lRe + lIm * lIm
@@ -734,7 +603,7 @@ final class STFTUpmixer {
         g2 = (g2 - coherenceBias) * biasInv
         if g2 < 0 { g2 = 0 } else if g2 > 1 { g2 = 1 }
 
-        // Level similarity — the criterion the classic estimator omits. It is ~0 for a
+        // Level similarity — the criterion the replaced estimator omitted. It is ~0 for a
         // source panned to one side, so hard-panned direct sound cannot be mistaken for
         // ambience however low its coherence happens to be.
         let lsim = 2 * sqrtf(cll * crr) / (cll + crr + eps)
@@ -754,14 +623,14 @@ final class STFTUpmixer {
         bandDRaw[b] += weight * dRaw
     }
 
-    /// Pass 2: one bin of the natural kernel. Everything here is power-exact: the direct
+    /// Pass 2: one bin. Everything here is power-exact: the direct
     /// mask, the front-ambience mask and the send mask sum to one in power, and the
     /// centre law is the constant-power three-speaker law, so no position or mask value
     /// dips.
     @inline(__always)
-    private func naturalRenderBin(_ k: Int, _ gate: Float, _ strength: Float,
-                                  _ spread: Float, _ shpS: UnsafePointer<Float>,
-                                  _ shpH: UnsafePointer<Float>, _ twelve: Bool) {
+    private func renderBin(_ k: Int, _ gate: Float, _ strength: Float,
+                           _ spread: Float, _ shpS: UnsafePointer<Float>,
+                           _ shpH: UnsafePointer<Float>, _ twelve: Bool) {
         let eps: Float = 1e-20
         let lRe = aRe[k], lIm = aIm[k]
         let rRe = bRe[k], rIm = bIm[k]
@@ -833,10 +702,11 @@ final class STFTUpmixer {
         }
     }
 
-    /// DC (real == true) or Nyquist (real == false) for the natural kernel.
-    private func naturalRealBin(l: Float, r: Float, real: Bool,
-                                shpS: UnsafePointer<Float>, shpH: UnsafePointer<Float>,
-                                twelve: Bool, strength: Float, spread: Float) {
+    /// DC (real == true) or Nyquist (real == false) — both live in bin 0 of the packed
+    /// layout (realp / imagp respectively).
+    private func realBin(l: Float, r: Float, real: Bool,
+                         shpS: UnsafePointer<Float>, shpH: UnsafePointer<Float>,
+                         twelve: Bool, strength: Float, spread: Float) {
         let k = real ? 0 : half
         let eps: Float = 1e-20
         let a = alphaPower, ia = 1 - a
@@ -989,45 +859,6 @@ final class STFTUpmixer {
     @inline(__always)
     private func rotateSet(_ ch: Int, _ k: Int, _ re: Float, _ im: Float, _ gain: Float) {
         rotate(ch, k, re, im, gain)
-    }
-
-    /// DC (real == true) or Nyquist (real == false) — both live in bin 0 of the packed
-    /// layout (realp / imagp respectively). Classic kernel.
-    @inline(__always)
-    private func writeRealBin(l: Float, r: Float, real: Bool) {
-        let k = real ? 0 : half
-        let ell = l * l, err = r * r, xr = l * r
-        let a = alphaPowerClassic, ia = 1 - a
-        pLL[k] = a * pLL[k] + ia * ell
-        pRR[k] = a * pRR[k] + ia * err
-        pLRr[k] = a * pLRr[k] + ia * xr
-        let cll = pLL[k], crr = pRR[k], cr = pLRr[k]
-        var g2 = (cr * cr) / (cll * crr + 1e-20)
-        if g2 > 1 { g2 = 1 }
-        if cr < 0 { g2 *= 0.25 }
-        let beta = (cll - crr) / (cll + crr + 1e-20)
-        let gd = sqrtf(g2), ga = sqrtf(1 - g2) * sAmbient
-        let dl = gd * l, dr = gd * r
-        let m = 0.5 * (dl + dr)
-        var c = 1 - abs(beta); if c < 0 { c = 0 }
-        c = c * c * sCenter; if c > 1 { c = 1 }
-
-        func put(_ ch: Int, _ v: Float) {
-            if real { outRe[ch][0] = v } else { outIm[ch][0] = v }
-        }
-        put(chL, (dl - m) + (1 - c) * m)
-        put(chR, (dr - m) + (1 - c) * m)
-        put(chC, 1.414213562 * c * m)
-        put(chLs, ga * l * sSurround)
-        put(chRs, ga * r * sSurround)
-        if channels == kAtmos714Channels {
-            put(chRls, ga * l * sSurround * 0.7)
-            put(chRrs, ga * r * sSurround * 0.7)
-            let wh = heightW[k] * sHeight
-            put(chVhl, ga * l * wh); put(chVhr, ga * r * wh)
-            put(chLtr, ga * l * wh * 0.7); put(chRtr, ga * r * wh * 0.7)
-        }
-        put(chLFE, pLFE ? 0.5 * (l + r) * lfeW[k] : 0)
     }
 
     /// cos/sin of φ·decorrelation, recomputed only when the amount actually changes

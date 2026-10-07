@@ -9,8 +9,10 @@ it: the artefacts that make an upmixer sound "cheap" next to Auro-Matic / Apple'
 Spatialize-Stereo / Sonos TV Audio Swap are *level* and *masking* behaviour that only
 shows up when you run a signal through it and measure.
 
-This script is a faithful NumPy port of the Swift kernel (`KernelV1`), a prototype of
-the proposed kernel (`KernelV2`), and a set of measurements + listening files:
+This script models the kernel that ships (`KernelV2`) *and* the first-generation kernel
+it replaced (`KernelV1` — the "Classic" kernel, deleted from the app once the quality
+pass was measured).  V1 is kept here on purpose: every before/after number in
+`docs/UPMIX-QUALITY.md` is a V1-vs-V2 comparison, and the app can no longer produce it.
 
     python3 upmix_lab.py --all
     python3 upmix_lab.py --compare           # metrics only, fast
@@ -23,7 +25,7 @@ deliberately dependency-free (numpy only) so it runs on the same Mac as the app.
 Metrics
 -------
   pan       : constant-power pan sweep -> output level vs input level (dB).
-              A correct upmixer is flat; the current kernel dips ~2.7 dB mid-pan.
+              A correct upmixer is flat; the removed V1 kernel dipped 2.88 dB mid-pan.
   hardpan   : hard-panned coherent source -> how much of it leaks into the surrounds.
   center    : centre-panned source -> centre-channel share and total energy.
   diffuse   : fully decorrelated input -> surround energy share, front/surround
@@ -136,7 +138,7 @@ def decorrelator_phase(channels: int, bins: int, sr: int, n: int,
 class KernelV1:
     """Current released kernel.  Kept bit-reasonable so the A/B is honest."""
 
-    name = "v1 (current)"
+    name = "v1 (old kernel)"
 
     def clone(self):
         """A fresh kernel with this one's configuration and no carried-over state.
@@ -305,7 +307,7 @@ class KernelV2:
          the table.  Latency is unchanged either way; the cost is two extra FFTs of N/2.
     """
 
-    name = "v2 (proposed)"
+    name = "v2 (shipped)"
 
     def clone(self):
         """A fresh kernel with this one's configuration and no carried-over state.
@@ -1272,10 +1274,11 @@ def measure_loudness(sr=SR, channels=12, dur=8.0):
         bl, br = binaural_render(y, channels, sr)
         return math.sqrt(float(np.mean((bl + br) ** 2)))
 
-    variants = [("v1 (current)", KernelV1(channels=channels)),
+    variants = [("v1 (old kernel)", KernelV1(channels=channels)),
                 ("v2 (auto level off)", KernelV2(channels=channels, auto_level=False)),
                 ("v2 (auto level on)", KernelV2(channels=channels, auto_level=True)),
-                ("v2 + multi-res (a.l. off)", KernelV2(channels=channels, auto_level=False))]
+                ("v2+multires [P1-2 x]", KernelV2(channels=channels, auto_level=False,
+                                                  multi_res=True))]
     out = {}
     for name, k in variants:
         y = k.run(L, R)

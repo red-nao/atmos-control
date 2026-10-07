@@ -15,8 +15,8 @@ What it contains:
 
 | Piece | What it is |
 |---|---|
-| `KernelV1` | a faithful port of the kernel that shipped before the quality pass (Classic) |
-| `KernelV2` | the design the Natural kernel follows, with every change switchable |
+| `KernelV1` | the first-generation kernel — the "Classic" one that has since been **deleted from the app and the UI**. Kept here because it is the baseline every before/after number in `docs/UPMIX-QUALITY.md` is measured against |
+| `KernelV2` | the kernel that ships, with every design change switchable (`v2 (shipped)`) |
 | measurement suite | pan sweep, centre, bass, hard-pan, diffuse, transient (with a click-level sweep + false-trigger duty), mask jitter, null, loudness |
 | binaural monitor | cheap HRTF (Woodworth ITD + head shadow + pinna notch) so width/front-back is audible |
 | WAV I/O | 48 kHz IEEE-float WAVE_FORMAT_EXTENSIBLE, 5.1 / 7.1.4 / stereo |
