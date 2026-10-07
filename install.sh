@@ -65,8 +65,11 @@ if [ "$(uname -m)" != "arm64" ]; then
 fi
 
 OS_MAJOR="$(sw_vers -productVersion | cut -d. -f1)"
+if [ "$OS_MAJOR" -lt 15 ] 2>/dev/null; then
+    fail "atmos-control requires macOS 15 or newer. Detected: $(sw_vers -productVersion)."
+fi
 if [ "$OS_MAJOR" -lt 26 ] 2>/dev/null; then
-    fail "atmos-control requires macOS 26 (Tahoe) or newer. Detected: $(sw_vers -productVersion)."
+    warn "macOS $(sw_vers -productVersion) detected: works per Issue #1 (15.7.9 verified), but the supported target is macOS 26+."
 fi
 
 if ! xcode-select -p >/dev/null 2>&1; then

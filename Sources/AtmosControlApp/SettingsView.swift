@@ -46,13 +46,20 @@ struct SettingsView: View {
                 ForEach(CaptureChoice.allCases) { Text($0.label).tag($0) }
             }
             if controller.captureChoice == .surround && !controller.surroundDriverInstalled {
-                notice("Surround 7.1.4 requires the 12-channel atmos-control driver — install it to enable this mode.")
+                notice("Surround 7.1.4 needs a 12-channel loopback — install the atmos-control driver (./install.sh --with-driver) or BlackHole 16ch (docs/BLACKHOLE_16CH.md).")
+                if controller.blackHolePresent {
+                    Text("BlackHole 16ch detected as \(controller.surroundCaptureName) — select Surround 7.1.4 to use it (SIP can stay on).")
+                        .font(.footnote).foregroundStyle(.secondary)
+                }
             } else if !controller.surroundDriverInstalled {
-                Text("Surround 7.1.4 requires the 12-channel atmos-control driver (not installed).")
+                Text("Surround 7.1.4 needs a 12-channel loopback — atmos-control driver or BlackHole 16ch (not installed).")
+                    .font(.footnote).foregroundStyle(.secondary)
+            } else if controller.captureChoice == .surround {
+                Text("Surround input: \(controller.surroundCaptureName) (ch 1–12 = 7.1.4, 13–16 ignored).")
                     .font(.footnote).foregroundStyle(.secondary)
             }
-            if controller.captureChoice != .personalized && !controller.atmosPresent {
-                notice("Virtual device not installed — use Personalized capture (no driver needed) or install the driver.")
+            if controller.captureChoice != .personalized && !controller.loopbackPresent {
+                notice("Virtual device not installed — use Personalized capture (no driver needed), install the driver, or install BlackHole 16ch.")
                 Button("Use Personalized capture") { controller.setCaptureChoice(.personalized) }
             }
 

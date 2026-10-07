@@ -68,9 +68,9 @@ enum CaptureChoice: String, CaseIterable, Identifiable {
         case .personalized:
             return "Keeps your headphones as the system output so Apple personalized Spatial Audio can engage. No driver needed."
         case .surround:
-            return "True multichannel from Apple Music (set Music ▸ Dolby Atmos to Automatic). Personalized spatial profile unavailable in this mode."
+            return "True multichannel from Apple Music (set Music ▸ Dolby Atmos to Automatic). Backed by the atmos-control driver or BlackHole 16ch (SIP-friendly). Personalized spatial profile unavailable in this mode."
         case .virtualStereo:
-            return "Routes all audio through the atmos-control virtual device. Works with any output, but rendering is generic (personalized HRTF can’t engage)."
+            return "Routes all audio through a virtual device (atmos-control driver or BlackHole). Works with any output, but rendering is generic (personalized HRTF can’t engage)."
         }
     }
 }

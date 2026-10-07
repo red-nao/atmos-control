@@ -71,8 +71,8 @@ and the upmixer's direct/ambient analysis then sees the signal you actually want
 | Mode | What it does | Driver needed | System Spatial Audio | Apple Music Dolby Atmos |
 |---|---|---|---|---|
 | **Personalized (headphones)** | Captures the system mix via a process tap and applies personalized, head-tracked binaural rendering. Default. | No | Off | Off |
-| **Surround 7.1.4** | Routes true 12-channel multichannel through the virtual device and places each channel at its canonical speaker angle. | Yes | Off | Automatic |
-| **Stereo (virtual device)** | Routes all audio through the atmos-control virtual device. Works with any output, but rendering is generic. | Yes | Off | Off |
+| **Surround 7.1.4** | Routes true 12-channel multichannel through the virtual device and places each channel at its canonical speaker angle. | Yes — bundled driver (`./install.sh --with-driver`) **or** BlackHole 16ch (SIP-friendly, see `docs/BLACKHOLE_16CH.md`) | Off | Automatic |
+| **Stereo (virtual device)** | Routes all audio through the virtual loopback device. Works with any output, but rendering is generic. | Yes — bundled driver **or** BlackHole 16ch | Off | Off |
 
 - Personalized HRTF only engages in **Personalized** mode, with AirPods that have a scanned personal
   profile, and while system Spatial Audio is off.
@@ -318,7 +318,7 @@ Note how `Gain` rises with `Distance`: with the inverse curve, +0.4 m costs roug
 ## Requirements
 
 - Apple Silicon Mac (arm64).
-- macOS 26 (Tahoe) or newer.
+- macOS 15 or newer (macOS 26 recommended).
 - Xcode command line tools (`xcode-select --install`) — provides `swift`.
 - AirPods Pro (with a scanned Personalized Spatial Audio profile) for the personalized,
   head-tracked experience. Any headphones work with the generic HRTF.
@@ -335,7 +335,10 @@ cd atmos-control
 package, assembles `dist/atmos-control.app`, and copies it into `/Applications`. It never changes
 your default output device.
 
-The optional HAL driver is only needed for the two loopback capture modes:
+The optional HAL driver is only needed for the two loopback capture modes.
+BlackHole 16ch can be used instead (SIP-friendly, no driver install required).
+See `docs/BLACKHOLE_16CH.md` for setup and the required Audio MIDI Setup
+speaker assignment (channels 1–12).
 
 ```bash
 ./install.sh --with-driver
@@ -397,7 +400,8 @@ System Settings ▸ General ▸ Login Items).
   normal after a device hiccup; repeated ones mean the device or driver is unstable.
 - **Default device stuck on the virtual sink** after using a loopback mode: set it back in
   Control Center ▸ Sound.
-- **Loopback modes greyed out**: the driver isn't installed — `./install.sh --with-driver`.
+- **Loopback modes greyed out**: no loopback device was found — install the driver
+  (`./install.sh --with-driver`) or BlackHole 16ch (see `docs/BLACKHOLE_16CH.md`).
 - **Personalized reads "Generic"**: it needs Personalized capture + Headphones output type +
   the Automatic/Output-type algorithm + AirPods with a scanned profile. Rendering is still binaural,
   just with the generic HRTF.
