@@ -109,7 +109,7 @@ smallest change the readout can show (0.1 dB on the EQ, 0.01 on `Center strength
 |---|---|---|
 | **Audio capture** | Picks how audio gets into the engine (see [Capture modes](#capture-modes)). Rebuilds the whole graph. | You want true multichannel from Apple Music (Surround 7.1.4), or your output isn't headphones (Stereo virtual device). Otherwise leave on Personalized. |
 | **Output device** | Where the rendered audio is played. "Follow system default" tracks whatever macOS is using. | You want atmos-control pinned to one device regardless of the system default. |
-| **Output type** | Tells the renderer what it is rendering *for*: Headphones / Built-in Speakers / External Speakers. Headphones = binaural HRTF; the speaker types switch to crosstalk-aware virtualization. | Only if you route the result to speakers. Personalized HRTF requires **Headphones**. |
+| **Output type** | Output-device switches default to Headphones. Choose Built-in Speakers or External Speakers manually to use crosstalk-aware virtualization. | Only if you route the result to speakers. Personalized HRTF requires **Headphones**. |
 | **Signal path** | Read-only: the live chain (capture → EQ → upmix → mixer → device). | Diagnostics only. |
 
 ## Equalizer

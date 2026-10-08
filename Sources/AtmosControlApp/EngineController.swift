@@ -408,11 +408,9 @@ final class EngineController {
         surroundCaptureName = engine.surroundCaptureName()
     }
 
-    /// Sensible output-type default for a sink (used on power-on and device switch).
-    private func outputType(for dev: AudioOutputDevice) -> OutputType {
-        if dev.isAirPods { return .headphones }
-        return dev.name.localizedCaseInsensitiveContains("headphone") ? .headphones : .builtInSpeakers
-    }
+    /// Keep the renderer in headphone mode when the physical sink changes. The user can
+    /// still choose Built-in Speakers or External Speakers explicitly in Full Control.
+    private var automaticOutputType: OutputType { .headphones }
 
     /// Pick which real sink to route through. nil = follow the system default.
     /// Swaps the playback graph live when running (atmos-control stays the default).
@@ -420,7 +418,7 @@ final class EngineController {
         selectedOutputID = dev?.id
         scheduleSave()
         if let d = dev { applyProfile(for: d.id) }
-        if let d = dev { outputName = d.name; config.outputType = outputType(for: d) }
+        if let d = dev { outputName = d.name; config.outputType = automaticOutputType }
         guard isOn else { engine.config = config; return }
         engine.stop()
         engine.config = config
@@ -473,7 +471,7 @@ final class EngineController {
         guard isOn else { return }
         engine.stop()
         if let d = outputs.first(where: { $0.id == id }) {
-            config.outputType = outputType(for: d)
+            config.outputType = automaticOutputType
             outputName = d.name
         }
         resolveAlgorithm()
@@ -499,7 +497,7 @@ final class EngineController {
             return
         }
         engine.stop()
-        config.outputType = outputType(for: fallback)
+        config.outputType = automaticOutputType
         engine.config = config
         do {
             try engine.start(outputDeviceID: fallback.id, captureDeviceID: activeCaptureID)
@@ -649,7 +647,7 @@ final class EngineController {
             // process object (so we can be excluded from the tap) and, in `.anchored`
             // aggregate mode, as the aggregate's main sub-device.
             let aggID = try tap.start(muted: true, outputDeviceID: real?.id)
-            if let r = real { config.outputType = outputType(for: r); outputName = r.name }
+            if let r = real { config.outputType = automaticOutputType; outputName = r.name }
             engine.config = config
             try engine.start(outputDeviceID: real?.id, captureDeviceID: aggID)
             activeCaptureID = aggID
@@ -702,7 +700,7 @@ final class EngineController {
         } else {
             real = devices.first(where: { $0.id == current.id })
         }
-        if let r = real { config.outputType = outputType(for: r); outputName = r.name }
+        if let r = real { config.outputType = automaticOutputType; outputName = r.name }
         engine.config = config
 
         SpatialEngine.setDefaultOutput(loop)
