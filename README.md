@@ -279,44 +279,49 @@ starting point, then move `Distance`, `Gain` and `Reverb blend` together.
 | Rendering | Reference distance | 1.00 m |
 | Rendering | Max distance | 6.0 m |
 | Rendering | Max attenuation | 30 dB |
-| Rendering | Room reverb | On |
 | Rendering | Reverb blend | 1 % |
 | Upmix | Upmix stereo to surround | On |
+| Upmix | Target layout | 7.1.4 |
 | Upmix | FFT size | 2048 |
+| Upmix | Strength | 1.00 |
+| Upmix | Center strength | 1.00 |
 | Upmix | Surround level | +0 dB |
 | Upmix | Height level | −6 dB |
+| Upmix | Surround spread | 1.00× |
+| Upmix | Transient preservation | 1.00 |
+| Upmix | Bass management on the sends | On |
+| Upmix | Auto level | On |
 | Upmix | LFE | Off |
 
-### "Small Room" — near-field, 5.1
+### "Small Room" — near-field, 7.1.4
 
 | Section | Setting | Value |
 |---|---|---|
 | Soundstage | **Distance** | **1.40 m** |
-| Soundstage | **Gain** | **+5 dB** |
+| Soundstage | **Gain** | **−2 dB** |
 | Rendering | **Room size** | **Small** |
-| Upmix | **Target layout** | **5.1** |
-| Upmix | Center strength | 1.35 |
-| Upmix | Decorrelation | 0.65 |
-| Upmix | Ambient bias | −3 dB |
-| Upmix | Surround spread | 1.00× |
+| Rendering | **Room reverb** | **Off** |
+| Upmix | Ambience spread | 0.30 |
+| Upmix | Decorrelation | 0.50 |
+| Upmix | Ambient bias | −5 dB |
+| Upmix | Reflections | +0 dB |
 
-Close, focused, slightly dry — good for vocals, podcasts and anything where intelligibility matters.
+Close, focused, dry (reverb off) — good for vocals, podcasts and anything where intelligibility matters.
 
 ### "Middle Room" — mid-field, 7.1.4
 
 | Section | Setting | Value |
 |---|---|---|
-| Soundstage | **Distance** | **1.80 m** |
-| Soundstage | **Gain** | **+9 dB** |
+| Soundstage | **Distance** | **1.85 m** |
+| Soundstage | **Gain** | **−3 dB** |
 | Rendering | **Room size** | **Medium** |
-| Upmix | **Target layout** | **7.1.4** |
-| Upmix | Center strength | 1.35 |
-| Upmix | Decorrelation | 0.80 |
-| Upmix | Ambient bias | −3 dB |
-| Upmix | Surround spread | 1.00× |
+| Rendering | **Room reverb** | **On** |
+| Upmix | Ambience spread | 0.60 |
+| Upmix | Decorrelation | 0.54 |
+| Upmix | Ambient bias | −4 dB |
+| Upmix | Reflections | −6 dB |
 
 A step back into a larger room with height channels — films, live recordings, anything atmospheric.
-Note how `Gain` rises with `Distance`: with the inverse curve, +0.4 m costs roughly 4 dB.
 
 ---
 
