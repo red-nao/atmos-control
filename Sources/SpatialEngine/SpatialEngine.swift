@@ -6,6 +6,7 @@
 
 import CoreAudio
 import AudioToolbox
+import Darwin
 import Dispatch
 
 // MARK: - Public config types
@@ -125,8 +126,8 @@ public enum AlgorithmMode: String, CaseIterable, Codable, Sendable, Identifiable
 }
 
 public struct SpatialConfig: Sendable, Equatable {
-    /// 10-band EQ applied to the stereo capture BEFORE spatialization (see EqualizerUnit).
-    /// Changing it never rebuilds the graph.
+    /// 10-band EQ before spatialization: AUNBandEQ on stereo capture (including upmix),
+    /// or an independent software EQ on each channel of a 7.1.4 capture. Live-update only.
     public var eq: EQConfig = EQConfig()
     /// STFT 2→N upmix, between the EQ and the spatial mixer (see STFTUpmixer).
     public var upmix: UpmixConfig = UpmixConfig()
@@ -168,10 +169,10 @@ public struct EngineState: Sendable, Equatable {
     public var running = false
     public var outputDeviceName = ""
     public var personalizedHRTFEngaged = false   // property 3116
-    public var peakL: Float = 0                   // linear 0…1, peak since last poll
+    public var peakL: Float = 0                   // final stereo output linear peak; may exceed 1
     public var peakR: Float = 0
-    /// Per-capture-channel peaks (linear 0…1) since last poll. 2 entries in stereo
-    /// modes, 12 in surround 7.1.4 (Atmos_7_1_4 channel order). peakL/peakR mirror [0]/[1].
+    /// Per-speaker feed peaks since last poll: post-EQ, scaled by Soundstage Gain, before
+    /// spatial rendering. 6/12 entries for upmix, 12 for surround capture, otherwise empty.
     public var peaks: [Float] = []
     public var ringFill: UInt64 = 0
     public var totalCaptured: UInt64 = 0          // rising ⇒ audio is flowing in
@@ -206,6 +207,7 @@ public final class SpatialEngine: @unchecked Sendable {
 
     private var ctx: Ctx?
     private var equalizer: EqualizerUnit?
+    private var surroundEqualizer: SurroundEqualizer?
     private var upmixer: STFTUpmixer?
     private var activeSampleRate: Double = 48_000     // capture rate of the running graph
     private var outputDeviceID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
@@ -388,16 +390,27 @@ public final class SpatialEngine: @unchecked Sendable {
         // slice either of them can be asked for is.
         let renderMax = max(playMax, ctx.captureBufSize, 4096)
 
-        // --- Equalizer (stereo capture only; the 12-channel loopback modes skip it) ---
+        // --- Equalizer ---
+        // Stereo paths (including STFT upmix) use Apple's AUNBandEQ. A 7.1.4 capture has
+        // twelve mono speaker feeds, so use the allocation-free software bank there.
         if captureChannels == 2 {
             if let eq = EqualizerUnit(ctxPtr: ctxPtr, sampleRate: captureRate, maxFrames: renderMax) {
                 eq.apply(config.eq, sampleRate: captureRate)
                 equalizer = eq
                 ctx.eqABL = makeShellABL(buffers: 2)
                 ctx.eqUnit = eq.unit        // publish LAST: the RT path keys off this
-                selog("  OK  equalizer ready (10 bands, preamp \(config.eq.effectivePreamp(sampleRate: captureRate)) dB, enabled=\(config.eq.enabled))")
+                selog("  OK  stereo equalizer ready (10 bands, preamp \(config.eq.effectivePreamp(sampleRate: captureRate)) dB, enabled=\(config.eq.enabled))")
             } else {
-                selog("  WARN equalizer unavailable — continuing without EQ")
+                selog("  WARN stereo equalizer unavailable — continuing without EQ")
+            }
+        } else if captureChannels == kAtmos714Channels {
+            if let eq = SurroundEqualizer(channels: captureChannels, sampleRate: captureRate,
+                                          maxFrames: Int(renderMax), config: config.eq) {
+                surroundEqualizer = eq
+                ctx.surroundEQPtr = UnsafeMutableRawPointer(Unmanaged.passUnretained(eq).toOpaque())
+                selog("  OK  7.1.4 software equalizer ready (10 bands/channel, enabled=\(config.eq.enabled))")
+            } else {
+                selog("  WARN 7.1.4 equalizer unavailable — continuing without EQ")
             }
         }
 
@@ -447,6 +460,7 @@ public final class SpatialEngine: @unchecked Sendable {
                 }
                 ctx.stage = stage
                 ctx.stageChannels = stagePlanes
+                ctx.meterChannelCount = stagePlanes
             }
 
             // --- STFT upmixer (stereo in → 6/12 virtual speakers) ---
@@ -516,7 +530,12 @@ public final class SpatialEngine: @unchecked Sendable {
 
     private func teardown() {
         removeSampleRateListener()
-        guard let ctx else { equalizer?.dispose(); equalizer = nil; upmixer = nil; return }
+        guard let ctx else {
+            equalizer?.dispose(); equalizer = nil
+            surroundEqualizer = nil
+            upmixer = nil
+            return
+        }
         if let c = ctx.captureUnit { AudioOutputUnitStop(c) }
         if let p = ctx.playbackUnit { AudioOutputUnitStop(p) }
         // Unpublish the EQ before disposing it: the RT path reads ctx.eqUnit.
@@ -524,8 +543,10 @@ public final class SpatialEngine: @unchecked Sendable {
         equalizer?.dispose()
         equalizer = nil
         ctx.upmixPtr = nil          // unpublish before the object goes away
+        ctx.surroundEQPtr = nil      // likewise for the multichannel EQ
         ctx.spatialUpmix = false
         upmixer = nil
+        surroundEqualizer = nil
         if let abl = ctx.eqABL {
             free(abl.unsafeMutablePointer)   // the buffers point at memory we don't own
             ctx.eqABL = nil
@@ -645,13 +666,25 @@ public final class SpatialEngine: @unchecked Sendable {
         s.running = isRunning
         guard isRunning, let ctx else { return s }
         s.outputDeviceName = cachedOutputName            // cached: no per-tick CFString HAL fetch
-        // Read+reset per-channel peaks off the RT thread (main-thread array build is fine).
-        var pk = [Float](repeating: 0, count: ctx.channels)
-        var c = 0
-        while c < ctx.channels { pk[c] = ctx.capturePeaks[c]; ctx.capturePeaks[c] = 0; c += 1 }
-        s.peaks = pk
-        s.peakL = pk.count > 0 ? pk[0] : 0
-        s.peakR = pk.count > 1 ? pk[1] : 0
+        // Read+reset per-speaker feed peaks. The RT meter is post-EQ; the mixer applies
+        // the same Soundstage Gain to every input bus, so mirror that gain for these bars.
+        let channelCount = min(ctx.meterChannelCount, kAtmos714Channels)
+        if channelCount > 2 {
+            var pk = [Float](repeating: 0, count: channelCount)
+            let gainDB = config.gain.isFinite ? config.gain : 0
+            let sourceGain = Float(pow(10.0, Double(gainDB) / 20.0))
+            var c = 0
+            while c < channelCount {
+                pk[c] = ctx.channelPeaks[c] * sourceGain
+                ctx.channelPeaks[c] = 0
+                c += 1
+            }
+            s.peaks = pk
+        }
+        // These are measured after the complete mixer, so EQ, Soundstage Gain, spatial
+        // summation/HRTF, and reverb are reflected in the main L/R peak display.
+        s.peakL = ctx.outputPeaks[0]; ctx.outputPeaks[0] = 0
+        s.peakR = ctx.outputPeaks[1]; ctx.outputPeaks[1] = 0
         s.ringFill = ctx.ring.fill()
         s.totalCaptured = ctx.totalCaptured
         s.totalPlayed = ctx.totalPlayed
@@ -697,10 +730,11 @@ public final class SpatialEngine: @unchecked Sendable {
     }
 
     /// Live-update the equalizer (gains, pre-amp, on/off). Never rebuilds the graph:
-    /// the on/off switch is AUNBandEQ's global bypass, so audio keeps flowing.
+    /// stereo uses AUNBandEQ's bypass; 7.1.4 uses a smoothed software bypass in the DSP bank.
     public func updateEQ(_ eq: EQConfig) {
         config.eq = eq
         equalizer?.apply(eq, sampleRate: activeSampleRate)
+        surroundEqualizer?.update(eq)
     }
 
     /// Live-update the upmixer's continuous parameters (no rebuild). Layout and FFT size
@@ -832,6 +866,7 @@ public final class SpatialEngine: @unchecked Sendable {
         } else {
             config = newConfig
             equalizer?.apply(config.eq, sampleRate: activeSampleRate)
+            surroundEqualizer?.update(config.eq)
             upmixer?.update(config.upmix)
             if let mixer = ctx?.spatialMixer { applySourceParams(mixer: mixer); applyReverbParams(mixer: mixer) }
         }

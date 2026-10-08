@@ -58,8 +58,8 @@ final class EngineController {
     /// The installed loopback exposes the full 12-channel 7.1.4 surface (enables Surround).
     var surroundDriverInstalled = false
 
-    /// Per-capture-channel peaks (Atmos_7_1_4 order) for the settings Levels surround meter;
-    /// [L,R] in stereo modes. Read only by SettingsView when surround is active.
+    /// Per-speaker feed peaks for Levels: 5.1/7.1.4 upmix planes or 7.1.4 capture channels,
+    /// after EQ and Soundstage Gain. Empty for ordinary stereo paths.
     var channelPeaks: [Float] = []
 
     // Live engine telemetry — individual tracked properties (was one EngineState struct)
@@ -75,7 +75,7 @@ final class EngineController {
     var selectedOutputID: AudioDeviceID?   // nil = follow current system default
     var captureMode: CaptureMode = .processTap   // default: personalized, no black-hole
 
-    // Smoothed peak-hold for the meters (linear 0…1).
+    // Smoothed post-processing output peak meters (linear; values may exceed 1 / 0 dBFS).
     var meterL: Float = 0
     var meterR: Float = 0
     var peakHoldL: Float = 0
@@ -1391,8 +1391,8 @@ final class EngineController {
         // no-op writes. ringFill/totalCaptured/totalPlayed change every tick during playback
         // but are read ONLY by SettingsView, so they invalidate the panel only when it's open.
         if personalizedHRTFEngaged != s.personalizedHRTFEngaged { personalizedHRTFEngaged = s.personalizedHRTFEngaged }
-        // Surround Levels meter (settings only): publish the full per-channel peak vector when
-        // in a 12-channel mode, else keep it empty so stereo modes never carry the extra array.
+        // Multichannel Levels meter (settings only): publish the 5.1/7.1.4 speaker feeds from
+        // either an upmix or a true surround capture; ordinary stereo keeps this empty.
         if s.peaks.count > 2 {
             if channelPeaks != s.peaks { channelPeaks = s.peaks }
         } else if !channelPeaks.isEmpty {

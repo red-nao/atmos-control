@@ -62,7 +62,7 @@ struct EqualizerSection: View {
         } header: {
             Text("Equalizer")
         } footer: {
-            SectionFootnote("Ten fixed bands (1 octave wide, ±\(Int(EQConfig.gainLimit)) dB) applied to the stereo signal before spatialization. Drag a fader, or double-click it to zero that band.")
+            SectionFootnote("Ten fixed bands (1 octave wide, ±\(Int(EQConfig.gainLimit)) dB) applied before spatialization: to stereo capture (including upmix), or independently to each channel of a 7.1.4 capture. The Equalizer switch bypasses the multichannel DSP; a flat curve skips band filtering (manual pre-amp still applies). Drag a fader, or double-click it to zero that band.")
         }
     }
 

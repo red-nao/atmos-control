@@ -1,4 +1,4 @@
-// MeterView — twin L/R peak meters with peak-hold and a dB scale.
+// MeterView — twin post-render output peak meters with peak-hold and a dBFS scale.
 
 import SwiftUI
 
@@ -61,6 +61,6 @@ struct MeterView: View {
                          at: CGPoint(x: bx + barW / 2, y: bot + 7), anchor: .center)
             }
         }
-        .accessibilityLabel("Output levels")
+        .accessibilityLabel("Post-processing output levels")
     }
 }

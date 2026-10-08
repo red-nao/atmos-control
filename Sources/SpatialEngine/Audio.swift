@@ -261,17 +261,20 @@ final class Ctx: @unchecked Sendable {
     /// `channels`; differs for BlackHole 16ch backing a 12ch ring (13–16 ignored,
     /// Issue #1 §4). The RT capture path copies only the first `channels` planes.
     var captureDeviceChannels: Int = 0
-    // Per-channel peak (max |sample|) since last poll, one Float per capture channel.
-    // Written on the capture RT thread, read+reset on the main thread — aligned Float
-    // access is atomic on arm64.
-    let capturePeaks: UnsafeMutablePointer<Float>
-    // Highest |sample| seen since the graph started, NEVER reset. Used by the silent-capture
-    // probe to tell "the tap is delivering zero-filled buffers" (TCC denied / macOS 26 tap
-    // bug) apart from "the poll meters happen to be idle right now".
+    // Per-speaker feed peaks since the last UI poll (post-EQ, before the spatial render).
+    // Upmix modes meter the generated 5.1/7.1.4 planes; surround modes meter the 12
+    // captured planes after EQ. Written on the playback RT thread, read+reset on main.
+    let channelPeaks: UnsafeMutablePointer<Float>
+    var meterChannelCount = 0
+    // Final stereo output peaks since the last poll, after the spatial mixer (or after EQ
+    // in direct mode). These are the useful clipping/headroom readings for the listener.
+    let outputPeaks: UnsafeMutablePointer<Float>
+    // Highest raw capture |sample| since graph start, NEVER reset. Used only by the
+    // silent-capture probe to distinguish a zero-filled tap from a quiet poll interval.
     var peakEver: Float = 0
 
-    // 10-band EQ on the stereo capture (nil in the 12-channel loopback modes). Rendered
-    // once per cycle by renderStereoInput(); it pulls the ring itself via eqInputCallback.
+    // Stereo AUNBandEQ (nil in 12-channel loopback modes, which use surroundEQPtr below).
+    // Rendered once per cycle by renderStereoInput(); it pulls the ring via eqInputCallback.
     var eqUnit: AudioUnit? = nil
     // A 2-buffer ABL shell whose mData pointers are re-aimed at the destination on every
     // render (no allocation on the RT thread).
@@ -286,9 +289,10 @@ final class Ctx: @unchecked Sendable {
     var dmL:             UnsafeMutablePointer<Float>? = nil
     var dmR:             UnsafeMutablePointer<Float>? = nil
     // Surround staging: `channels` planes filled once per render cycle from the ring.
-    /// The STFT upmixer, published as a raw pointer so the RT thread can reach it
-    /// without touching ARC (same trick as Ctx itself). Owned by SpatialEngine.
+    // The STFT upmixer and surround EQ are published as raw pointers so the RT thread can
+    // reach them without ARC. Owned by SpatialEngine; unpublished before teardown.
     var upmixPtr: UnsafeMutableRawPointer? = nil
+    var surroundEQPtr: UnsafeMutableRawPointer? = nil
     var spatialUpmix = false
 
     var stage: UnsafeMutablePointer<UnsafeMutablePointer<Float>>? = nil
@@ -299,11 +303,16 @@ final class Ctx: @unchecked Sendable {
     init(channels: Int) {
         self.channels = channels
         ring = RingBuffer(channels: channels)
-        capturePeaks = .allocate(capacity: channels)
-        capturePeaks.initialize(repeating: 0, count: channels)
+        channelPeaks = .allocate(capacity: kAtmos714Channels)
+        channelPeaks.initialize(repeating: 0, count: kAtmos714Channels)
+        outputPeaks = .allocate(capacity: 2)
+        outputPeaks.initialize(repeating: 0, count: 2)
         captureDeviceChannels = channels
     }
-    deinit { capturePeaks.deallocate() }
+    deinit {
+        channelPeaks.deallocate()
+        outputPeaks.deallocate()
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -382,7 +391,7 @@ nonisolated(unsafe) let captureInputCallback: AURenderCallback = { (
     if status != noErr { return status }
     let written = ctx.ring.writeAll(from: abl, frameCount: n)
     ctx.totalCaptured &+= UInt64(written)
-    // Per-channel peak (raw loop + fabsf — no Swift runtime calls on the RT thread).
+    // Highest raw capture peak (silent-capture probe only; no Swift runtime on RT).
     let cnt = Int(n)
     let ch = ctx.channels
     var c = 0
@@ -392,7 +401,6 @@ nonisolated(unsafe) let captureInputCallback: AURenderCallback = { (
             var pk: Float = 0
             var i = 0
             while i < cnt { let a = fabsf(src[i]); if a > pk { pk = a }; i &+= 1 }
-            if pk > ctx.capturePeaks[c] { ctx.capturePeaks[c] = pk }
             if pk > ctx.peakEver { ctx.peakEver = pk }
         }
         c &+= 1
@@ -448,6 +456,49 @@ func renderStereoInput(_ ctx: Ctx, _ ts: UnsafePointer<AudioTimeStamp>,
     ctx.ring.read(ch0: dst0, ch1: dst1, frameCount: n)
 }
 
+/// Accumulate peaks from the post-EQ channel feeds. The main-thread poll scales these by
+/// the current Soundstage Gain, which is the same common gain applied to every mixer bus.
+@inline(__always)
+func accumulateChannelPeaks(_ ctx: Ctx,
+                            _ planes: UnsafeMutablePointer<UnsafeMutablePointer<Float>>,
+                            frames: Int) {
+    let channels = min(ctx.meterChannelCount, kAtmos714Channels)
+    guard channels > 2, frames > 0 else { return }
+    var channel = 0
+    while channel < channels {
+        let samples = planes[channel]
+        var peak: Float = 0
+        var i = 0
+        while i < frames {
+            let magnitude = fabsf(samples[i])
+            if magnitude > peak { peak = magnitude }
+            i += 1
+        }
+        if peak > ctx.channelPeaks[channel] { ctx.channelPeaks[channel] = peak }
+        channel += 1
+    }
+}
+
+/// Meter the actual stereo samples handed to the output HAL. In spatial mode this includes
+/// EQ, Soundstage Gain, HRTF/spatial summation and reverb; direct mode includes its EQ.
+@inline(__always)
+func accumulateOutputPeaks(_ ctx: Ctx, _ abl: UnsafeMutableAudioBufferListPointer, frames: Int) {
+    guard frames > 0, abl.count >= 2,
+          let rawL = abl[0].mData, let rawR = abl[1].mData else { return }
+    let left = rawL.assumingMemoryBound(to: Float.self)
+    let right = rawR.assumingMemoryBound(to: Float.self)
+    var peakL: Float = 0, peakR: Float = 0
+    var i = 0
+    while i < frames {
+        let l = fabsf(left[i]), r = fabsf(right[i])
+        if l > peakL { peakL = l }
+        if r > peakR { peakR = r }
+        i += 1
+    }
+    if peakL > ctx.outputPeaks[0] { ctx.outputPeaks[0] = peakL }
+    if peakR > ctx.outputPeaks[1] { ctx.outputPeaks[1] = peakR }
+}
+
 // Sole ring consumer in spatialize mode (runs inside AudioUnitRender on the
 // playback HAL thread). dualPoint = stereo split across two mono buses;
 // bed = stereo copy; mono point = mono downmix.
@@ -497,6 +548,7 @@ nonisolated(unsafe) let spatialInputCallback: AURenderCallback = { (
             renderStereoInput(ctx, inTimeStamp, dmL, dmR, n)
             let up = Unmanaged<STFTUpmixer>.fromOpaque(upPtr).takeUnretainedValue()
             up.process(inLeft: dmL, inRight: dmR, out: stage, frames: Int(n))
+            accumulateChannelPeaks(ctx, stage, frames: Int(n))
             ctx.lastStagedSampleTime = st
         }
         let b = Int(inBusNumber)
@@ -516,6 +568,11 @@ nonisolated(unsafe) let spatialInputCallback: AURenderCallback = { (
         let st = inTimeStamp.pointee.mSampleTime
         if st != ctx.lastStagedSampleTime {
             ctx.ring.readAll(into: stage, frameCount: n)
+            if let eqPtr = ctx.surroundEQPtr {
+                let eq = Unmanaged<SurroundEqualizer>.fromOpaque(eqPtr).takeUnretainedValue()
+                eq.process(stage, frames: Int(n))
+            }
+            accumulateChannelPeaks(ctx, stage, frames: Int(n))
             ctx.lastStagedSampleTime = st
         }
         let b = Int(inBusNumber)
@@ -533,6 +590,11 @@ nonisolated(unsafe) let spatialInputCallback: AURenderCallback = { (
             return noErr
         }
         ctx.ring.readAll(into: stage, frameCount: n)
+        if let eqPtr = ctx.surroundEQPtr {
+            let eq = Unmanaged<SurroundEqualizer>.fromOpaque(eqPtr).takeUnretainedValue()
+            eq.process(stage, frames: Int(n))
+        }
+        accumulateChannelPeaks(ctx, stage, frames: Int(n))
         var c = 0
         while c < nbuf && c < ctx.stageChannels {
             if let p = abl[c].mData { memcpy(p, stage[c], Int(n) * 4); abl[c].mDataByteSize = n * 4 }
@@ -577,6 +639,10 @@ nonisolated(unsafe) let playbackRenderCallback: AURenderCallback = { (
     let n = inNumberFrames
     if ctx.spatialize, let mixer = ctx.spatialMixer {
         let st = AudioUnitRender(mixer, ioActionFlags, inTimeStamp, 0, n, ioData)
+        if st == noErr {
+            let ablp = UnsafeMutableAudioBufferListPointer(ioData)
+            accumulateOutputPeaks(ctx, ablp, frames: Int(n))
+        }
         ctx.totalPlayed &+= UInt64(n)
         return st
     }
@@ -590,6 +656,7 @@ nonisolated(unsafe) let playbackRenderCallback: AURenderCallback = { (
     } else if ablp.count == 1, let p = ablp[0].mData {
         memset(p, 0, Int(ablp[0].mDataByteSize))   // dead path (format is always stereo)
     }
+    accumulateOutputPeaks(ctx, ablp, frames: Int(n))
     ctx.totalPlayed &+= UInt64(n)
     return noErr
 }

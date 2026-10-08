@@ -265,9 +265,9 @@ struct SettingsView: View {
     private var levels: some View {
         Section("Levels") {
             HStack { Spacer(); MeterView().frame(width: 90, height: 150); Spacer() }
-            LabeledContent("Peak L / R") {
+            LabeledContent("Output peak L / R") {
                 Text(peakText).font(.system(.callout, design: .monospaced)).monospacedDigit()
-                    .foregroundStyle(controller.isOn ? Color.primary : .secondary)
+                    .foregroundStyle(outputOverload ? Color.red : (controller.isOn ? Color.primary : .secondary))
             }
             LabeledContent("Engine") {
                 Text(controller.isOn ? "Running" : "Stopped")
@@ -277,6 +277,9 @@ struct SettingsView: View {
             if controller.channelPeaks.count > 2 {
                 SurroundMeterRow(peaks: controller.channelPeaks)
             }
+            Text("Output peak is measured at the final app output, after EQ and (when enabled) spatial rendering. Multichannel bars show each speaker feed after EQ and Soundstage Gain, before spatial rendering. If OVER appears, reduce Pre-amp or Soundstage Gain and aim just below 0 dBFS.")
+                .font(.footnote).foregroundStyle(.secondary)
+                .fixedSize(horizontal: false, vertical: true)
             if showDebug {
                 LabeledContent("Ring fill") {
                     Text("\(controller.ringFill) frames").font(.system(.callout, design: .monospaced)).monospacedDigit()
@@ -305,10 +308,16 @@ struct SettingsView: View {
         }
     }
 
+    private var outputOverload: Bool {
+        max(max(controller.meterL, controller.meterR),
+            max(controller.peakHoldL, controller.peakHoldR)) >= 1
+    }
+
     private var peakText: String {
         guard controller.isOn else { return "—" }
-        func db(_ x: Float) -> String { x > 0.0001 ? String(format: "%+.0f", linearToDb(x)) : "−∞" }
-        return "\(db(controller.meterL)) / \(db(controller.meterR)) dB"
+        func db(_ x: Float) -> String { x > 0.000001 ? String(format: "%+.1f", linearToDb(x)) : "−∞" }
+        let levels = "\(db(controller.meterL)) / \(db(controller.meterR)) dBFS"
+        return outputOverload ? "\(levels) · OVER" : levels
     }
 
     private func notice(_ text: String) -> some View {
@@ -413,17 +422,22 @@ struct SettingsView: View {
 
 // MARK: - Surround (7.1.4) per-channel meter row
 
-/// A compact 12-channel meter for surround capture (amendment H). SF-Mono channel labels in
-/// Atmos_7_1_4 order; slim vertical bars from the per-channel linear peaks.
+/// Compact 5.1/7.1.4 speaker-feed meter. Values are measured after EQ and scaled by
+/// Soundstage Gain, before each feed enters the spatial renderer.
 struct SurroundMeterRow: View {
     let peaks: [Float]
-    private static let labels = ["L", "R", "C", "LFE", "Ls", "Rs", "Rls", "Rrs", "Vhl", "Vhr", "Ltr", "Rtr"]
+    private static let labels51 = ["L", "R", "C", "LFE", "Ls", "Rs"]
+    private static let labels714 = ["L", "R", "C", "LFE", "Ls", "Rs", "Rls", "Rrs", "Vhl", "Vhr", "Ltr", "Rtr"]
+
+    private var layoutLabel: String { peaks.count <= Self.labels51.count ? "5.1" : "7.1.4" }
+    private var isOver: Bool { peaks.contains { $0 >= 1 } }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Channels (7.1.4)").font(.footnote).foregroundStyle(.secondary)
+            Text("Speaker feeds (\(layoutLabel))").font(.footnote).foregroundStyle(.secondary)
             Canvas { ctx, size in
-                let n = min(peaks.count, Self.labels.count)
+                let labels = peaks.count <= Self.labels51.count ? Self.labels51 : Self.labels714
+                let n = min(peaks.count, labels.count)
                 guard n > 0 else { return }
                 let labelH: CGFloat = 12
                 let top: CGFloat = 2, bot = size.height - labelH
@@ -436,7 +450,7 @@ struct SurroundMeterRow: View {
                     let bx = cx - barW / 2
                     ctx.stroke(Path(roundedRect: CGRect(x: bx, y: top, width: barW, height: H), cornerRadius: 2),
                                with: .color(grid.opacity(0.35)), lineWidth: 1)
-                    // linear peak → -60…0 dB fill height
+                    // linear peak → −60…0 dBFS fill height; the text below exposes overs.
                     let p = peaks[i]
                     let db = p > 0 ? 20 * log10(p) : -60
                     let f = CGFloat((max(-60, min(0, db)) + 60) / 60)
@@ -445,12 +459,16 @@ struct SurroundMeterRow: View {
                     if fillH > 0.5 {
                         ctx.fill(Path(CGRect(x: bx + 1, y: bot - fillH, width: barW - 2, height: fillH)), with: .color(col))
                     }
-                    ctx.draw(Text(Self.labels[i]).font(.system(size: 7, design: .monospaced)).foregroundColor(grid),
+                    ctx.draw(Text(labels[i]).font(.system(size: 7, design: .monospaced)).foregroundColor(grid),
                              at: CGPoint(x: cx, y: bot + labelH / 2 + 1), anchor: .center)
                 }
             }
             .frame(height: 78)
-            .accessibilityLabel("Surround channel levels")
+            .accessibilityLabel("\(layoutLabel) speaker feed levels after EQ and gain")
+            if isOver {
+                Label("At least one speaker feed is over 0 dBFS.", systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote).foregroundStyle(.red)
+            }
         }
     }
 }

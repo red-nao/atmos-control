@@ -27,7 +27,7 @@ Apple's spatial renderer instead of a single system on/off switch.
 
 | | Feature | Where |
 |---|---|---|
-| **F1** | 10-band equalizer (32 Hz … 16 kHz, ±12 dB, 1-octave parametric) hosted on `AUNBandEQ`, applied to the stereo signal **before** spatialization | Full Control ▸ Equalizer |
+| **F1** | 10-band equalizer (32 Hz … 16 kHz, ±12 dB, 1-octave parametric), applied before spatialization to stereo or independently to all twelve 7.1.4 feeds | Full Control ▸ Equalizer |
 | **F2** | Automatic pre-amp — computes the combined response and pulls the output down so the loudest point of the curve sits at 0 dB (manual override available) | Full Control ▸ Equalizer ▸ Pre-amp |
 | **F3** | EQ presets: save / rename / delete, JSON-persisted | Full Control ▸ Equalizer ▸ Preset |
 | **F4** | **STFT stereo→surround upmixer** (direct/ambient separation, 5.1 or 7.1.4) feeding the spatial mixer's virtual speakers | Full Control ▸ Upmix |
@@ -56,7 +56,7 @@ and the upmixer's direct/ambient analysis then sees the signal you actually want
 
 1. **Capture** — the system mix is read via a process tap (default) or routed through the
    atmos-control virtual audio device (loopback modes).
-2. **Equalize** — ten fixed bands plus an automatic pre-amp, applied to the stereo capture.
+2. **Equalize** — ten fixed bands plus an automatic pre-amp, applied to the stereo capture or independently to each channel of a true 7.1.4 capture.
 3. **Upmix** (optional) — a short-time Fourier transform splits the stereo signal into *direct*
    sound (correlated, pannable) and *ambience* (uncorrelated), then distributes them across 6 or 12
    virtual speakers.
@@ -119,7 +119,7 @@ smallest change the readout can show (0.1 dB on the EQ, 0.01 on `Center strength
 | **Equalizer** (switch) | Bypasses the whole EQ unit (not a per-band reset — your curve is kept). | A/B-ing the EQ against flat. |
 | **Preset** | Loads a stored curve + pre-amp. `Flat` is built in and can't be edited; `•` marks unsaved edits. The `…` menu holds Save, Save as…, Rename, Delete. | Per-genre or per-headphone curves. |
 | **Band faders** (32, 64, 125, 250, 500, 1k, 2k, 4k, 8k, 16k Hz) | ±12 dB on a 1-octave parametric band. Click above/below the knob for 0.1 dB; double-click to zero that band. | Tame a resonance, add low shelf-ish warmth, soften sibilance (4–8 kHz), etc. |
-| **Pre-amp ▸ Auto** | Analyses the combined response and applies `−max(0, peak)` so the loudest point of your curve lands at 0 dB. Prevents clipping before the spatializer. | Leave it on. This is the safe default. |
+| **Pre-amp ▸ Auto** | Analyses the combined response and applies `−max(0, peak)` so the loudest point of your curve lands at 0 dB. Prevents EQ-induced clipping before the spatializer; positive Soundstage Gain or spatial summation can still raise the final output, so check Levels. | Leave it on. This is the safe default. |
 | **Pre-amp ▸ Manual** | You set the headroom yourself (−24 … +12 dB, 0.1 dB steps). | You want extra level and know your curve won't clip, or you want to match loudness while A/B-ing. |
 | **Flatten** | Zeroes all ten bands. | Starting over. |
 | *curve peak* readout | How far the current curve overshoots 0 dB — the number Auto pre-amp is cancelling. | Diagnostics. |
@@ -246,8 +246,13 @@ profile until you press Save.
 
 ## Levels
 
-Read-only meters and engine counters (peak L/R, per-channel surround meters, ring fill,
-captured/played frame counters) for diagnostics.
+Read-only meters for gain staging and diagnostics. **Output peak L/R** is measured at the final
+app output after EQ and, when enabled, the spatial render (so it follows both EQ Pre-amp and
+Soundstage Gain, and can report above 0 dBFS). The per-channel speaker-feed meter appears for
+true surround capture and 5.1/7.1.4 upmix; those bars are measured after EQ and Soundstage Gain,
+before spatial rendering. A red `OVER` warning marks feeds at or above 0 dBFS. Reduce Pre-amp
+or Soundstage Gain when `OVER` appears, then aim just below 0 dBFS. Debug builds can also show
+ring fill and captured/played frame counters.
 
 ---
 
@@ -420,7 +425,7 @@ Layout:
 
 | Path | What's in it |
 |---|---|
-| `Sources/SpatialEngine/` | The engine library: `SpatialEngine` (graph + lifecycle), `Audio` (realtime callbacks, SPSC ring, `AUSpatialMixer`), `EqualizerUnit` (`AUNBandEQ`), `STFTUpmixer` + `Decorrelator`, `ProcessTap`, `Devices`, `ConfigCodable` |
+| `Sources/SpatialEngine/` | The engine library: `SpatialEngine` (graph + lifecycle), `Audio` (realtime callbacks, SPSC ring, `AUSpatialMixer`), `EqualizerUnit` (`AUNBandEQ` for stereo), `SurroundEqualizer` (12-channel DSP bank), `STFTUpmixer` + `Decorrelator`, `ProcessTap`, `Devices`, `ConfigCodable` |
 | `Sources/AtmosControlApp/` | The SwiftUI app: `EngineController` (the view model and all orchestration), `PanelView`, `SettingsView`, `EQView`, `UpmixView`, `ProfilesView`, `SettingsStore`, `StepSlider` |
 | `Driver/` | The optional HAL virtual device |
 | `App/build-app.sh` | Bundle assembly + ad-hoc signing |
